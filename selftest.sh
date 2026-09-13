@@ -23,7 +23,9 @@ ok() { printf 'ok    %s\n' "$*"; }
 fail() { fails=$((fails + 1)); printf 'FAIL  %s\n' "$*"; }
 
 cd "$OPS"
-scripts=$(ls ./*.sh fluxer | sed 's|^\./||')
+# lib.sh is sourced, not run: it must parse, but it is not a command.
+scripts=$(ls ./*.sh fluxer | sed 's|^\./||' | grep -vx 'lib.sh')
+sh -n lib.sh 2>/dev/null || fail "lib.sh does not parse"
 
 # 1. Every script parses and is executable.
 for f in $scripts; do
@@ -73,9 +75,18 @@ done
 tracked=$(git -C "$OPS" ls-files 2>/dev/null | grep -E '(^|/)(\.env|notify\.conf|offsite\.conf)$|\.dump$|\.tgz$' || true)
 [ -z "$tracked" ] && ok "no secrets or backup artifacts tracked by git" || fail "tracked secrets: $tracked"
 
+# 6. The tests. Scratch directories and stubs only: nothing here reaches the instance.
+for t in tests/*_test.sh; do
+	if out=$(sh "$t" 2>&1); then
+		ok "$t"
+	else
+		fail "$t:"; printf '%s\n' "$out" | grep -v '^ok ' | sed 's/^/      /'
+	fi
+done
+
 if [ "$LINT" -eq 1 ]; then
 	# shellcheck disable=SC2086 # $scripts is a list of plain file names
-	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts 2>&1); then
+	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts lib.sh tests/*.sh 2>&1); then
 		ok "shellcheck clean (warnings and above)"
 	else
 		fail "shellcheck:"; printf '%s\n' "$out" | sed 's/^/      /'
