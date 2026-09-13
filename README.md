@@ -98,11 +98,38 @@ the object store. It is included in every backup.
 ## Known gaps
 
 - **Backups are on the same disk as the data** (`/dev/sda1`). They cover a bad
-  upgrade; they cover nothing if the host or disk is lost. ~24 MB/night, so
-  shipping them off-box is cheap and not yet done.
+  upgrade; they cover nothing if the host or disk is lost. See *Backup strategy*
+  below — decided, deliberately not built yet.
 - No alerting. The watchdog logs to `/var/log/fluxer-watchdog.log` and repairs
   what it can, but nothing notifies you.
 - No permanent fix for the firewalld/Docker interaction.
+
+## Backup strategy (decided, not built)
+
+`backup.sh` today takes a **full** copy of the database and the entire uploads
+volume every night and keeps 14. That is fine at the current size (~24 MB/night,
+~336 MB total) and **does not scale**: the cost is `total_size x 14`. Once uploads
+reach, say, 20 GB, that is 280 GB of backups on a 146 GB disk. It breaks exactly
+when there is finally data worth protecting.
+
+Decided plan, deferred by choice:
+
+1. Move to [`restic`](https://restic.net) — content-addressed dedup, incremental,
+   encrypted. Nightly cost drops to roughly what actually changed.
+2. Push the repo to **Cloudflare R2** (same account as the DNS proxy, S3-compatible,
+   no egress fees, which matters on a restore).
+3. Then cut local retention to **2 days** (`KEEP_DAYS=2` in `backup.sh`) as a
+   fast-restore cache, with full history living off-box.
+
+Until step 2 exists, local retention stays at 14 days: shortening it early would
+just mean less protection with nothing replacing it.
+
+**Trigger to revisit:** when `fluxer_seaweedfs-data` passes ~1 GB, or before any
+serious user growth. Check it with:
+
+```sh
+docker run --rm -v fluxer_seaweedfs-data:/data:ro alpine:3.22 du -sh /data
+```
 
 ## Notes on this instance
 
