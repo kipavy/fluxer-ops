@@ -296,4 +296,46 @@ EOF
   assert_contains "bad checksum refuses to run" "did not verify" "$(cat "$tmp/o4")"
   finish )
 
+# --- extras
+( load
+  OPS="$tmp/inst/ops" ASSUME_YES=0 CHECK_ONLY=0
+  printf '#!/bin/sh\necho "notify $*" >> "%s/extra-calls"\n' "$tmp" > "$OPS/notify.sh"
+  printf '#!/bin/sh\necho "offsite $*" >> "%s/extra-calls"\n' "$tmp" > "$OPS/offsite.sh"
+  chmod +x "$OPS/notify.sh" "$OPS/offsite.sh"
+
+  printf 'n\n' | extra_alerts > /dev/null
+  [ -e "$OPS/notify.conf" ] && fail "declining alerts writes nothing" || pass "declining alerts writes nothing"
+
+  printf 'y\nwebhook\nhttps://discord.example.test/api/webhooks/1/abc\n' | extra_alerts > /dev/null 2>&1
+  assert_contains "webhook written" "NOTIFY_WEBHOOK_URL='https://discord.example.test/api/webhooks/1/abc'" "$(cat "$OPS/notify.conf")"
+  assert_eq "notify.conf is private" 600 "$(stat -c %a "$OPS/notify.conf")"
+  assert_contains "test alert sent" "notify test" "$(cat "$tmp/extra-calls")"
+  out=$(extra_alerts < /dev/null); assert_contains "configured alerts are not offered again" "✓ alerts" "$out"
+
+  printf 'y\nACC\nbkt\nKEYID\nSECRET\n\n' | extra_offsite > "$tmp/off" 2>&1
+  conf=$(cat "$OPS/offsite.conf")
+  assert_contains "R2 repository" "RESTIC_REPOSITORY='s3:https://ACC.r2.cloudflarestorage.com/bkt'" "$conf"
+  assert_contains "key id" "AWS_ACCESS_KEY_ID='KEYID'" "$conf"
+  pw=$(sed -n "s/^RESTIC_PASSWORD='\(.*\)'$/\1/p" "$OPS/offsite.conf")
+  assert_eq "generated password is 48 hex chars" 48 "${#pw}"
+  assert_contains "password shown once to save" "$pw" "$(cat "$tmp/off")"
+  assert_eq "offsite.conf is private" 600 "$(stat -c %a "$OPS/offsite.conf")"
+  assert_contains "repository initialised" "offsite init" "$(cat "$tmp/extra-calls")"
+
+  # firewalld not running: not offered at all
+  SYSTEMCTL=false
+  assert_eq "firewall fix not offered without firewalld" "" "$(extra_firewall < /dev/null)"
+  finish )
+
+# --- finish
+( load
+  OPS="$tmp/inst/ops" DOMAIN=chat.example.test
+  printf '#!/bin/sh\nexit 0\n' > "$OPS/check.sh"; printf '#!/bin/sh\nexit 0\n' > "$OPS/doctor.sh"
+  NEW_INSTANCE=1; out=$(phase_finish)
+  assert_contains "live URL" "Your instance is live: https://chat.example.test" "$out"
+  assert_contains "make yourself admin" "fluxer users staff" "$out"
+  NEW_INSTANCE=0; out=$(phase_finish)
+  case "$out" in *"users staff"*) fail "existing instance: no first-account steps" ;; *) pass "existing instance: no first-account steps" ;; esac
+  finish )
+
 finish

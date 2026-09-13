@@ -448,6 +448,147 @@ core_wiring() {
 	IFS=$_ifs
 }
 
+# --- phase 4: optional extras -------------------------------------------------
+
+# write_private <file>: stdin to a file only its owner can read. These hold tokens.
+write_private() {
+	(umask 077 && cat > "$1")
+	chmod 600 "$1"
+}
+
+extra_alerts() {
+	if [ -f "$OPS/notify.conf" ]; then st_ok "alerts configured (fluxer notify test)"; return 0; fi
+	say "  Alerts: hear about an outage or a failed backup on your phone, in a chat, or by email."
+	if ! ask "Set up alerts?" n; then st_skip "alerts (later: fluxer setup)"; return 0; fi
+	_ch=$(prompt "Channel: ntfy, webhook or email" ntfy)
+	case "$_ch" in
+		ntfy)
+			_url=$(prompt "ntfy topic URL" "https://ntfy.sh/fluxer-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')")
+			_line="NOTIFY_NTFY_URL='$_url'"
+			say "    In the ntfy app (Android, iOS, web), subscribe to: $_url"
+			;;
+		webhook)
+			_url=$(prompt "Webhook URL (Discord, Slack or Fluxer)")
+			_line="NOTIFY_WEBHOOK_URL='$_url'"
+			;;
+		email)
+			_url=$(prompt "Send alerts to")
+			valid_email "$_url" || { st_bad "not an email address: $_url"; st_skip "alerts"; return 0; }
+			_line="NOTIFY_EMAIL_TO='$_url'"
+			say "    Sent through the SMTP settings already in .env (FLUXER_EMAIL_SMTP_*)."
+			;;
+		*) st_bad "unknown channel: $_ch"; st_skip "alerts"; return 0 ;;
+	esac
+	case "$_url" in '' | *"'"*) st_bad "that value is empty or contains a quote"; st_skip "alerts"; return 0 ;; esac
+	printf '# Written by setup.sh on %s. Every option: notify.conf.example\n%s\n' "$(date -u +%F)" "$_line" \
+		| write_private "$OPS/notify.conf"
+	if "$OPS/notify.sh" test; then
+		st_ok "alerts set up; a test was sent"
+	else
+		st_bad "the test alert did not go through: edit $OPS/notify.conf, then fluxer notify test"
+	fi
+}
+
+extra_offsite() {
+	if [ -f "$OPS/offsite.conf" ]; then st_ok "off-site backups configured (fluxer offsite status)"; return 0; fi
+	say "  Off-site backups: an encrypted copy of each nightly backup in a Cloudflare R2 bucket,"
+	say "  so losing this server is not losing the data. Needs a bucket and an R2 API token"
+	say "  with Object Read & Write on it (R2 > Manage API tokens)."
+	if ! ask "Set up off-site backups?" n; then st_skip "off-site backups (later: fluxer setup)"; return 0; fi
+	_acc=$(prompt "Cloudflare account ID")
+	_bkt=$(prompt "Bucket name")
+	_key=$(prompt "Access key ID")
+	_sec=$(prompt_secret "Secret access key")
+	for _v in "$_acc" "$_bkt" "$_key" "$_sec"; do
+		case "$_v" in '' | *"'"*) st_bad "all four are needed, without quotes"; st_skip "off-site backups"; return 0 ;; esac
+	done
+	_pw=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+	write_private "$OPS/offsite.conf" <<EOF
+# Written by setup.sh on $(date -u +%F). Every option: offsite.conf.example
+RESTIC_PASSWORD='$_pw'
+RESTIC_REPOSITORY='s3:https://$_acc.r2.cloudflarestorage.com/$_bkt'
+AWS_ACCESS_KEY_ID='$_key'
+AWS_SECRET_ACCESS_KEY='$_sec'
+AWS_DEFAULT_REGION=auto
+EOF
+	say ""
+	say "    The encryption password of your off-site backups:"
+	say ""
+	say "        $_pw"
+	say ""
+	say "    Save it in a password manager now. Without it nobody can restore them, you included,"
+	say "    and the copy on this server is gone exactly when you would need it."
+	prompt "Press Enter once it is saved" > /dev/null
+	if "$OPS/offsite.sh" init; then
+		st_ok "off-site repository ready: every nightly backup is pushed to it"
+	else
+		st_bad "offsite init failed: fix $OPS/offsite.conf, then fluxer offsite init"
+	fi
+}
+
+extra_firewall() {
+	$SYSTEMCTL is-active --quiet firewalld 2> /dev/null || return 0
+	if "$OPS/firewall-fix.sh" --installed; then st_ok "firewalld fix installed"; return 0; fi
+	if [ "$SUDO_OK" -ne 1 ]; then st_skip "firewalld fix (needs sudo)"; return 0; fi
+	say "  firewalld is running here. A firewalld reload wipes Docker's network rules and every"
+	say "  port of the stack stops answering until Docker restarts. The fix restarts it with firewalld."
+	if ! ask "Install the firewalld fix?" y; then st_skip "firewalld fix (later: fluxer firewall-fix)"; return 0; fi
+	if "$OPS/firewall-fix.sh" --apply --yes; then st_ok "firewalld fix installed"; else st_bad "firewall-fix failed (above)"; fi
+}
+
+extra_cf() {
+	if [ "$BEHIND_CF" -ne 1 ]; then
+		_ip=$(public_ip)
+		[ -n "$_ip" ] || return 0
+		curl -fsS --max-time 10 "${CF_IPS_URL:-https://www.cloudflare.com/ips-v4}" > "$TMP/cf-v4" 2> /dev/null || return 0
+		[ "$(dns_verdict "$_ip" "$(resolve4 "$DOMAIN")" "$TMP/cf-v4")" = cloudflare ] || return 0
+	fi
+	if "$OPS/cf-ips.sh" --quiet > /dev/null 2>&1; then st_ok "Cloudflare ranges trusted"; return 0; fi
+	say "  $DOMAIN is behind Cloudflare, and the instance does not trust all of Cloudflare's"
+	say "  addresses yet: rate limits and logs would see Cloudflare instead of your users."
+	if ! ask "Trust Cloudflare's current ranges?" y; then st_skip "Cloudflare ranges (later: fluxer cf-ips)"; return 0; fi
+	if "$OPS/cf-ips.sh" --apply --yes; then st_ok "Cloudflare ranges trusted"; else st_bad "cf-ips failed (above)"; fi
+}
+
+phase_extras() {
+	say ""
+	say "Optional (Enter skips)"
+	extra_alerts
+	extra_offsite
+	extra_firewall
+	extra_cf
+}
+
+# --- phase 5: finish ----------------------------------------------------------
+
+phase_finish() {
+	say ""
+	say "Checking"
+	if "$OPS/check.sh" --quiet; then
+		st_ok "https://$DOMAIN is serving"
+	else
+		st_bad "some checks fail (above). A new stack can take a minute: run fluxer check again shortly"
+	fi
+	"$OPS/doctor.sh" --quiet || true
+	say ""
+	case ":$PATH:" in
+		*":$BIN_DIR:"*) ;;
+		*) say "Open a new shell (or: export PATH=\"$BIN_DIR:\$PATH\") for the fluxer command."; say "" ;;
+	esac
+	if [ "$NEW_INSTANCE" -eq 1 ]; then
+		cat <<EOF
+Your instance is live: https://$DOMAIN
+
+Next:
+  1. Open it and create your account.
+  2. fluxer users staff <your username>     make yourself an admin
+  3. fluxer status                          any time; fluxer help for the rest
+EOF
+	else
+		say "fluxer-ops is set up for https://$DOMAIN. fluxer status any time; fluxer help for the rest."
+	fi
+}
+
 # --- main ---------------------------------------------------------------------
 
 [ "${SETUP_SOURCE_ONLY:-0}" = 1 ] && return 0
@@ -496,4 +637,6 @@ say "Wiring"
 if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.env" ]; then core_wiring; fi
 
 [ "$CHECK_ONLY" -eq 1 ] && exit "$MISSING"
+[ "$EXTRAS" -eq 1 ] && phase_extras
+phase_finish
 exit 0
