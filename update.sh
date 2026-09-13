@@ -67,15 +67,39 @@ if [ "$ASSUME_YES" -eq 0 ]; then
 	esac
 fi
 
-# 5. Apply, then prove it actually works.
+# 5. Take the badge patch off, if it is on. It mounts a patched bundle chunk AND
+#    an index.html naming that chunk, and both are release-specific. Leaving them
+#    mounted across an update serves the new image with an index.html pointing at
+#    chunks it no longer has, which breaks the app outright rather than just
+#    losing the badge. Off before, back on after.
+BADGE_PATCHED=0
+if [ -f "$FLUXER_DIR/docker-compose.override.yml" ] \
+	&& grep -q 'badge-patch.sh' "$FLUXER_DIR/docker-compose.override.yml"; then
+	BADGE_PATCHED=1
+	echo
+	echo "--- taking the Plutonium badge patch off for the update ---"
+	./ops/badge-patch.sh --revert
+fi
+
+reapply_badge_patch() {
+	[ "$BADGE_PATCHED" -eq 1 ] || return 0
+	echo
+	echo "--- re-applying the Plutonium badge patch to the new bundle ---"
+	./ops/badge-patch.sh \
+		|| echo "WARNING: the badge patch did not re-apply. Run: fluxer badge-patch" >&2
+}
+
+# 6. Apply, then prove it actually works.
 echo
 if sh install.sh --update --non-interactive; then
 	echo
 	echo "--- verifying ---"
 	if ./ops/check.sh; then
+		reapply_badge_patch
 		echo
 		echo "Update complete and verified."
 	else
+		reapply_badge_patch
 		echo
 		echo "Update applied but the health checks FAIL." >&2
 		echo "Roll back with:  sh install.sh --rollback --dir $FLUXER_DIR" >&2
@@ -85,5 +109,10 @@ else
 	echo
 	echo "Update FAILED." >&2
 	echo "Roll back with:  sh install.sh --rollback --dir $FLUXER_DIR" >&2
+	# Deliberately not re-applied: patching a half-updated stack is worse than
+	# running unpatched, and unpatched is a working app without the badge.
+	if [ "$BADGE_PATCHED" -eq 1 ]; then
+		echo "The Plutonium badge patch is OFF. Re-apply with 'fluxer badge-patch' once this is sorted." >&2
+	fi
 	exit 1
 fi

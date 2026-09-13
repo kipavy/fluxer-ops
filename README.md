@@ -21,6 +21,7 @@ fluxer up | down | restart [svc] | ps
 
 fluxer update [--check]    Update safely: preflight, plan, apply, verify
 fluxer rollback            Go back to the previous release
+fluxer badge-patch         Re-apply the Plutonium badge patch (--revert to undo)
 
 fluxer backup              Take a backup now
 fluxer backups             List every backup, ours and the installer's
@@ -51,6 +52,7 @@ ln -sf /home/ubuntu/Documents/fluxer/ops/fluxer ~/.local/bin/fluxer
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, and brings the stack up if services are missing. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
+| `badge-patch.sh` | `update.sh`, and you | Patches the web bundle so the Plutonium badge renders on a self-hosted instance. `--revert` undoes it. |
 
 ## Install on a fresh host
 
@@ -103,6 +105,96 @@ sh install.sh --rollback --dir /home/ubuntu/Documents/fluxer
 Rollback needs the previous images still on disk, so do not run
 `docker image prune -a` until you are confident in a release. Database schema
 migrations are not reverted by a rollback.
+
+## The Plutonium badge patch
+
+The premium badge is hidden on self-hosted instances by the **client**, not by the
+API. `UserProfileBadges.tsx` reads:
+
+```ts
+if (!selfHosted && profile?.premiumType && profile.premiumType !== UserPremiumTypes.NONE)
+```
+
+so no amount of account state brings it back. Everything else is already in place:
+the API serves `premium_type` to profile viewers on any instance (it is stripped
+only for `BADGE_HIDDEN` or a restricted profile), and `/badges/plutonium.svg` ships
+in the `fluxer-static` image. The same gate hides the Partner and Bug Hunter
+badges; `STAFF` has no gate, which is why that one shows on a stock instance.
+
+There is no setting for it, and flipping `FLUXER_SELF_HOSTED` is not an option --
+it also drives the setup flow, registration and the Stripe paths. So
+`badge-patch.sh` edits the shipped bundle:
+
+1. Finds the one content-hashed chunk in the **app-proxy image** that names
+   `plutonium.svg`, and copies it out along with `index.html` (from the image,
+   never from the running container, so a re-run starts from pristine bytes).
+2. Deletes `!selfHosted &&` from that single condition, matching on the *shape* of
+   the minified expression rather than on a release's variable names.
+3. Publishes the result under a **new, content-derived name**
+   (`<chunk>.<sha8>.js`, plus `.br` and `.gz` -- app-proxy serves whichever
+   precompressed sibling the browser asks for) and rewrites `index.html` to point
+   at it. The stock chunk stays in the image and simply stops being loaded.
+4. Bind-mounts those files through `docker-compose.override.yml` (auto-loaded,
+   because `.env` sets no `COMPOSE_FILE`), then proves app-proxy serves the patched
+   bytes in all three encodings and that both the origin and public HTML reference
+   the new chunk.
+
+The image is never modified. `fluxer badge-patch --revert` removes the override and
+the patched files; the stock `index.html` then points back at the stock chunk.
+
+### Why a new filename instead of overwriting the chunk
+
+This is the part worth keeping. Bundle chunks are served
+`cache-control: public, max-age=31536000, immutable`, so overwriting one in place
+leaves browsers and CDN edges serving the pre-patch bytes from a URL that, by
+contract, never revalidates. That was not theoretical here: with the origin
+provably patched in every encoding, and Cloudflare's cache for that exact URL
+purged and re-verified from this host, the badge still did not appear in the
+browser -- including a fresh incognito window. The same patch published under a new
+filename appeared immediately.
+
+`index.html` is `no-cache` and comes back `cf-cache-status: DYNAMIC`, so a new
+chunk name is picked up on the next page load, everywhere, with nothing to purge.
+Note that app-proxy **templates `index.html` on every request** (it injects
+`__FLUXER_CONFIG__`) and does not serve the precompressed HTML siblings, so the
+mounted file is a template, not a served artifact.
+
+One cosmetic consequence: `sw.js` still lists the stock chunk in its precache
+manifest, so the service worker caches a file nothing loads.
+
+### Keeping it applied
+
+The mounted `index.html` names a release-specific chunk, so it must **not** stay
+mounted across an update: the new image would be served an `index.html` pointing at
+chunks it no longer has, which breaks the app rather than just losing the badge.
+`update.sh` therefore reverts the patch before applying an update and re-applies it
+after the health checks pass. If the update itself fails it leaves the patch off --
+a working app without the badge -- and says so.
+
+Anything else that changes the app image needs `fluxer badge-patch` by hand. A
+re-run on unchanged content republishes to the same URL, so it is safe any time.
+
+### Badge variant
+
+Which badge renders comes from `premium_type` on the user row: `1` (subscription)
+gives the Plutonium badge with a "subscriber since" tooltip, `2` (lifetime) gives
+**Visionary** plus a `#N` sequence badge from `premium_lifetime_sequence`. No admin
+endpoint sets it -- `/admin/users/:id/premium-flags` only toggles the `PremiumFlags`
+bits -- so it is a direct row edit:
+
+```sh
+docker compose exec -T postgres psql -U fluxer -d fluxer -c "
+update fluxer_kv
+set row_data = jsonb_set(
+      jsonb_set(row_data, '{premium_type}', '2'::jsonb),
+      '{version}', ((row_data->>'version')::int + 1)::text::jsonb),
+    updated_at = now()
+where table_name = 'users' and row_data->>'username' = 'your_username';"
+```
+
+`version` is the row's optimistic-concurrency counter and must be bumped with any
+hand edit. Nothing caches user rows (the repository reads Postgres per request), so
+a client reload is enough -- no restart.
 
 ## Restoring from a backup
 
