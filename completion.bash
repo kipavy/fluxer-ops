@@ -34,7 +34,7 @@ _fluxer() {
 		words='status check doctor errors top voice logs up down ps restart psql valkey sh
 			changelog update rollback prune users premium gifts badge-patch
 			backup backups verify-backup restore offsite
-			notify disk env cf-ips firewall-fix install-host help'
+			notify disk env cf-ips firewall-fix install-host setup help'
 	else
 		case "$cmd" in
 			status) words='--json' ;;
@@ -52,6 +52,7 @@ _fluxer() {
 			firewall-fix) words='--apply --revert --installed --test --yes' ;;
 			disk) words='--json --record' ;;
 			install-host) words='--check --yes' ;;
+			setup) words='--check --yes --no-extras --fluxer-dir --domain --email' ;;
 			users)
 				if [ "$COMP_CWORD" -eq 2 ]; then words='list show staff verify-email stats'
 				else case "$sub" in

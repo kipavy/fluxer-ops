@@ -51,7 +51,7 @@ undispatched=$(for c in $help_cmds; do printf '%s\n' "$case_cmds" | grep -qxF --
 	|| fail "in the help but not dispatched: $undispatched"
 # Aliases and the stack verbs shown on one shared line are fine to leave out.
 undocumented=$(for c in $case_cmds; do
-	case "$c" in help | --help | -h | verify | gift | down | ps | valkey) continue ;; esac
+	case "$c" in help | --help | -h | verify | gift | down | ps | valkey | install-host) continue ;; esac
 	printf '%s\n' "$help_cmds" | grep -qxF -- "$c" || printf '%s ' "$c"
 done)
 [ -z "$undocumented" ] && ok "every dispatched command is in the help" \

@@ -62,8 +62,7 @@ Host
   fluxer cf-ips [--apply]    Keep trusted proxies in step with Cloudflare's ranges
   fluxer firewall-fix [--apply | --revert]
                              Stop firewalld restarts from wiping Docker's chains
-  fluxer install-host [--check]
-                             Symlink, shell completion, cron jobs on this host
+  fluxer setup [--check]     Install or re-check: prerequisites, instance, cron, extras
 
   fluxer help                This text
 USAGE
@@ -326,6 +325,7 @@ case "$cmd" in
 	cf-ips) exec "$OPS/cf-ips.sh" "$@" ;;
 	firewall-fix) exec "$OPS/firewall-fix.sh" "$@" ;;
 	install-host) exec "$OPS/install-host.sh" "$@" ;;
+	setup) exec "$OPS/setup.sh" "$@" ;;
 	logs) compose logs "$@" ;;
 	up) compose up -d "$@" ;;
 	down) compose down "$@" ;;
