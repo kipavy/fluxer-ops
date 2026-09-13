@@ -5,7 +5,8 @@
 #   ./check.sh --quiet    only failures (used by watchdog.sh)
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 QUIET=0
 if [ "${1:-}" = "--quiet" ]; then QUIET=1; fi
 

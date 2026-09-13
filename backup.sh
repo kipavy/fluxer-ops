@@ -11,11 +11,11 @@
 # good run sends the all-clear. Without a notify.conf that is a no-op.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 KEEP_DAYS=${KEEP_DAYS:-14}
 LOG="$BACKUP_ROOT/backup.log"
-NOTIFY="$(cd "$(dirname "$0")" && pwd)/notify.sh"
+NOTIFY="$OPS/notify.sh"
 
 # Best effort: a missing or failing notify.sh never fails the backup itself.
 notify() {
@@ -82,7 +82,7 @@ log "complete     $(du -sh "$dest" | cut -f1)  (keeping ${KEEP_DAYS}d)"
 # 5. Off-site. A silent no-op until ops/offsite.conf exists; offsite.sh alerts on
 #    its own key, so a failed push never marks the local backup as failed.
 stage='off-site push'
-"$FLUXER_DIR/ops/offsite.sh" push --if-configured "$dest" >> "$BACKUP_ROOT/offsite.log" 2>&1 \
+"$OPS/offsite.sh" push --if-configured "$dest" >> "$BACKUP_ROOT/offsite.log" 2>&1 \
 	|| log "offsite FAILED  (see offsite.log)"
 
 if [ "$uploads" = ok ]; then

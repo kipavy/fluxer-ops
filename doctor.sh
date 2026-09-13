@@ -19,9 +19,8 @@
 # Exit 0 = no FAIL (warnings allowed), 1 = at least one FAIL.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
-OPS="$FLUXER_DIR/ops"
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 KEEP_DAYS=${KEEP_DAYS:-14}
 UPLOADS_VOLUME=fluxer_seaweedfs-data
 HELPER_IMAGE=alpine:3.22

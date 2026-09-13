@@ -12,9 +12,10 @@
 # when it recovers). Without a notify.conf that is a no-op.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 LOG=${LOG:-/var/log/fluxer-watchdog.log}
-NOTIFY="$(cd "$(dirname "$0")" && pwd)/notify.sh"
+NOTIFY="$OPS/notify.sh"
 
 log() { printf '%s  %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >> "$LOG"; }
 
@@ -80,17 +81,17 @@ fi
 
 # 3. Is it actually serving? Do not restart on a transient blip, and do not page
 #    on one either: a failure has to survive one retry before it is an alert.
-if ! "$FLUXER_DIR/ops/check.sh" --quiet > /dev/null 2>&1; then
-	log "health check FAILING - run $FLUXER_DIR/ops/check.sh to see why"
+if ! "$OPS/check.sh" --quiet > /dev/null 2>&1; then
+	log "health check FAILING - run $OPS/check.sh to see why"
 	sleep 30
-	if errs=$("$FLUXER_DIR/ops/check.sh" --quiet 2>&1 > /dev/null); then
+	if errs=$("$OPS/check.sh" --quiet 2>&1 > /dev/null); then
 		log "health check passed on retry"
 		notify ok health
 	else
 		why=$(printf '%s\n' "$errs" | grep -v '^[[:space:]]*$' | head -n 15 | cut -c 1-200)
 		notify alert health "check.sh is failing (twice, 30s apart):
 $why
-Run $FLUXER_DIR/ops/check.sh for the full picture."
+Run $OPS/check.sh for the full picture."
 	fi
 else
 	notify ok health "check.sh passes again."

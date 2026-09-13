@@ -75,6 +75,18 @@ done
 tracked=$(git -C "$OPS" ls-files 2>/dev/null | grep -E '(^|/)(\.env|notify\.conf|offsite\.conf)$|\.dump$|\.tgz$' || true)
 [ -z "$tracked" ] && ok "no secrets or backup artifacts tracked by git" || fail "tracked secrets: $tracked"
 
+# 7. Paths come from lib.sh, never from the file: a host laid out differently
+#    must not need edits. Excludes this file itself: it necessarily contains the
+#    string it greps for, right here.
+hard=$(grep -l '/home/ubuntu' ./*.sh fluxer completion.bash ./*.example 2>/dev/null \
+	| sed 's|^\./||' | grep -vx 'selftest.sh' || true)
+[ -z "$hard" ] && ok "no hardcoded /home/ubuntu paths" || fail "hardcoded /home/ubuntu in: $hard"
+nolib=$(for f in $(grep -l 'FLUXER_DIR' ./*.sh fluxer | sed 's|^\./||'); do
+	case "$f" in lib.sh | get.sh | selftest.sh) continue ;; esac
+	grep -q '/lib\.sh"' "$f" || printf '%s ' "$f"
+done)
+[ -z "$nolib" ] && ok "every script that needs the instance sources lib.sh" || fail "does not source lib.sh: $nolib"
+
 # 6. The tests. Scratch directories and stubs only: nothing here reaches the instance.
 for t in tests/*_test.sh; do
 	if out=$(sh "$t" 2>&1); then

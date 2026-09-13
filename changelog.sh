@@ -18,7 +18,8 @@
 #   ./changelog.sh --all    every commit
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 REPO=${FLUXER_SOURCE_REPO:-https://github.com/fluxerapp/fluxer}
 RAW_BASE='https://raw.githubusercontent.com/fluxerapp/fluxer'
 LIMIT=60

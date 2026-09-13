@@ -67,7 +67,7 @@
 # SYSTEMD_DIR, SYSTEMCTL, SUDO.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
 SYSTEMD_DIR=${SYSTEMD_DIR:-/etc/systemd/system}
 SYSTEMCTL=${SYSTEMCTL:-systemctl}
 SUDO=${SUDO-sudo}
@@ -219,7 +219,7 @@ Verifying by hand. Step 2 restarts the whole stack, so pick a quiet moment.
 1. Reload (docker should cope on its own, no restart expected):
      sudo firewall-cmd --reload
      sleep 5; sudo iptables -t nat -L -n | grep '^Chain DOCKER'   # must print
-     $FLUXER_DIR/ops/check.sh
+     $OPS/check.sh
 
 2. firewalld restart (the case this fix is for):
      systemctl show docker -p ActiveEnterTimestamp                # note it
@@ -227,7 +227,7 @@ Verifying by hand. Step 2 restarts the whole stack, so pick a quiet moment.
      sleep 60
      systemctl show docker -p ActiveEnterTimestamp                # must be newer
      sudo iptables -t nat -L -n | grep '^Chain DOCKER'            # must print
-     $FLUXER_DIR/ops/check.sh
+     $OPS/check.sh
 
    Without the fix, step 2 leaves docker running on the old timestamp and, if its
    D-Bus connection is gone, no DOCKER chain.

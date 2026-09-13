@@ -24,7 +24,8 @@
 # PG_CONTAINER=<container> points psql at a scratch database instead (plain docker exec).
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 PG_CONTAINER=${PG_CONTAINER:-}
 
 die() { printf 'debug: %s\n' "$*" >&2; exit 1; }

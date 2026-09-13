@@ -25,8 +25,8 @@
 # row's optimistic-concurrency counter) bumped, exactly as the app would.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-OPS="$FLUXER_DIR/ops"
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 OVERRIDE="$FLUXER_DIR/docker-compose.override.yml"
 
 # PremiumFlags, from packages/constants/src/UserConstants.ts.

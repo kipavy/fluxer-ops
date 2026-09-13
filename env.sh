@@ -17,7 +17,8 @@
 #                                  .env.example instead of the local one
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 ENV="$FLUXER_DIR/.env"
 RAW_BASE='https://raw.githubusercontent.com/fluxerapp/fluxer'
 

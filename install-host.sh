@@ -15,8 +15,8 @@
 # rewritten or removed, and a line already present in any form is left alone.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-OPS="$FLUXER_DIR/ops"
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 BIN_DIR=${BIN_DIR:-$HOME/.local/bin}
 COMPLETION_DIR=${COMPLETION_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions}
 

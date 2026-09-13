@@ -33,9 +33,8 @@
 # directory, which `fluxer restore` then applies. Never straight onto a volume.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
-OPS="$FLUXER_DIR/ops"
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 CONF=${OFFSITE_CONF:-$OPS/offsite.conf}
 # Pinned by tag AND digest: this image handles every secret we have.
 RESTIC_IMAGE=${RESTIC_IMAGE:-restic/restic:0.19.1@sha256:136600b6ff6843d61d355f7f71f460a166429f35de6fd11b568fece3c9a4d510}

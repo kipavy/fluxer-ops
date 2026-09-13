@@ -5,7 +5,15 @@
 # Service and backup names are read live (compose config, the backup dirs), so they
 # stay right across updates without this file changing.
 
-_fluxer_dir() { printf '%s' "${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}"; }
+# Same resolution as lib.sh, which cannot be sourced into an interactive shell
+# (it sets variables and may call docker). Parent of the real ops/ directory,
+# unless FLUXER_DIR is set.
+_fluxer_ops=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+_fluxer_dir() { printf '%s' "${FLUXER_DIR:-$(dirname "$_fluxer_ops")}"; }
+# Named apart from _fluxer_backups() below (which lists backup NAMES, not the
+# root they live under): giving both the same name would make the lister call
+# itself instead of this one.
+_fluxer_backup_root() { printf '%s' "${BACKUP_ROOT:-$(dirname "$(_fluxer_dir)")/fluxer-backups}"; }
 
 _fluxer_services() {
 	(cd "$(_fluxer_dir)" 2>/dev/null && docker compose config --services 2>/dev/null)
@@ -13,7 +21,7 @@ _fluxer_services() {
 
 _fluxer_backups() {
 	local d
-	for d in "${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}"/*/ "$(_fluxer_dir)"/backups/*/; do
+	for d in "$(_fluxer_backup_root)"/*/ "$(_fluxer_dir)"/backups/*/; do
 		[ -f "$d/fluxer.dump" ] && basename "$d"
 	done
 }

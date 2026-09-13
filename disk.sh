@@ -17,8 +17,8 @@
 #   ./disk.sh --json     report as JSON, and append to the history
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 RECORD_DIR=${RECORD_DIR:-$FLUXER_DIR/backups}
 HISTORY=${DISK_HISTORY:-$BACKUP_ROOT/disk-history.tsv}
 MODE=text
