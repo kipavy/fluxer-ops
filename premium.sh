@@ -143,16 +143,18 @@ from fluxer_kv where $(where_user "$id");")
 	#  - ENABLED_OVERRIDE on, PERKS_DISABLED off: the perks
 	#  - BADGE_HIDDEN and BADGE_MASKED off: those exist to suppress or downgrade
 	#    the badge, which is the one thing this command is for
-	#  - premium_until removed: null means "never expires" to both the server
-	#    (checkHasActivePaidPremium) and the client (isPremiumExpiredLocally), so
-	#    nothing sweeps it away later
+	#  - premium_until and premium_gift_extension_ends_at removed: the server takes
+	#    the later of the two as the end (getEffectivePremiumUntil), and with both
+	#    absent it means "never expires" to the server (checkHasActivePaidPremium)
+	#    and the client (isPremiumExpiredLocally). A leftover gift end would
+	#    otherwise strip this grant, badge and all, the day it passes.
 	psql_ -c "
 update fluxer_kv
 set row_data = jsonb_set(
       jsonb_set(
         jsonb_set(
           jsonb_set(
-            (row_data - 'premium_until' - 'premium_grace_ends_at' - 'premium_will_cancel'),
+            (row_data - 'premium_until' - 'premium_gift_extension_ends_at' - 'premium_grace_ends_at' - 'premium_will_cancel'),
             '{premium_flags}',
             to_jsonb(((coalesce((row_data->>'premium_flags')::int, 0)
                        | $ENABLED_OVERRIDE)
@@ -208,8 +210,8 @@ cmd_revoke() {
 update fluxer_kv
 set row_data = jsonb_set(
       jsonb_set(
-        (row_data - 'premium_since' - 'premium_until' - 'premium_grace_ends_at'
-                  - 'premium_will_cancel' - 'premium_billing_cycle'),
+        (row_data - 'premium_since' - 'premium_until' - 'premium_gift_extension_ends_at'
+                  - 'premium_grace_ends_at' - 'premium_will_cancel' - 'premium_billing_cycle'),
         '{premium_flags}',
         to_jsonb((coalesce((row_data->>'premium_flags')::int, 0)
                   & ~($ENABLED_OVERRIDE | $PURCHASE_DISABLED)))),
