@@ -11,7 +11,9 @@
 # Otherwise it is empty, and need_instance says where it looked and how to fix it.
 # Two Fluxer projects are never guessed between.
 #
-# BACKUP_ROOT: from the environment, else fluxer-backups next to the instance.
+# BACKUP_ROOT: from the environment, else fluxer-backups next to the instance. Empty
+# iff FLUXER_DIR is empty: an inherited BACKUP_ROOT with no instance behind it is only
+# a trap (every consumer calls need_instance first), so it is dropped, not kept.
 
 OPS=$(dirname "$(readlink -f "${OPS_SELF:-$0}")")
 
@@ -45,7 +47,7 @@ fi
 if [ -n "$FLUXER_DIR" ]; then
 	BACKUP_ROOT=${BACKUP_ROOT:-$(dirname "$FLUXER_DIR")/fluxer-backups}
 else
-	BACKUP_ROOT=${BACKUP_ROOT:-}
+	BACKUP_ROOT=''
 fi
 
 need_instance() {

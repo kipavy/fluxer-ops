@@ -56,6 +56,12 @@ json2="[{\"Name\":\"a\",\"Status\":\"running(1)\",\"ConfigFiles\":\"$tmp/other/d
 assert_eq "two Fluxer projects: not guessed" \
 	"$tmp/loose/ops||" "$(run env LS_JSON="$json2" "$tmp/loose/ops/probe")"
 
+# No instance found (default LS_JSON=[], no docker-compose.yml above loose/ops):
+# an inherited BACKUP_ROOT must not survive, or it becomes a trap once need_instance
+# is bypassed or misused - only FLUXER_DIR earns a BACKUP_ROOT.
+assert_eq "BACKUP_ROOT from the environment is dropped when no instance is found" \
+	"$tmp/loose/ops||" "$(run env BACKUP_ROOT=/b "$tmp/loose/ops/probe")"
+
 out=$(run env NEED=1 "$tmp/loose/ops/probe" 2>&1) && rc=0 || rc=$?
 assert_eq "need_instance exits 2 when nothing is found" 2 "$rc"
 assert_contains "need_instance says how to fix it" "FLUXER_DIR=" "$out"
