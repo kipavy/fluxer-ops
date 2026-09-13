@@ -1,0 +1,220 @@
+#!/bin/sh
+# fluxer - one entry point for operating the self-hosted instance.
+#
+# A thin dispatcher. The real work lives in the scripts next to this file, which
+# are tested independently and are also what cron calls directly.
+set -eu
+
+FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
+OPS="$FLUXER_DIR/ops"
+
+usage() {
+	cat <<'USAGE'
+fluxer - operate the self-hosted Fluxer instance
+
+  fluxer status              What is running, disk, last backup, health at a glance
+  fluxer check               Full health check: endpoints, WebSocket, containers
+  fluxer logs [svc] [-f]     Tail logs, all services or one
+  fluxer up                  Start the stack
+  fluxer down                Stop the stack (does NOT delete data)
+  fluxer restart [svc]       Restart everything, or one service
+
+  fluxer update [--check]    Update safely: preflight, plan, apply, verify
+  fluxer rollback            Go back to the previous release
+
+  fluxer backup              Take a backup now
+  fluxer backups             List what backups exist
+  fluxer verify-backup       Prove the newest dump restores, into a scratch database
+  fluxer restore <dir>       Restore from a backup (destructive, asks first)
+
+  fluxer help                This text
+
+Deployment: /home/ubuntu/Documents/fluxer   Backups: /home/ubuntu/Documents/fluxer-backups
+USAGE
+}
+
+die() { printf '%s\n' "$*" >&2; exit 1; }
+compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
+
+# Backups live in two places: ours in BACKUP_ROOT, and the installer's own
+# pre-upgrade records in <deployment>/backups.
+all_backup_dirs() {
+	ls -dt "$BACKUP_ROOT"/*/ "$FLUXER_DIR"/backups/*/ 2>/dev/null || true
+}
+
+newest_backup() {
+	all_backup_dirs | while read -r d; do
+		[ -f "$d/fluxer.dump" ] && { printf '%s\n' "${d%/}"; break; }
+	done
+}
+
+cmd_status() {
+	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
+	printf 'instance   https://%s\n' "$domain"
+
+	ver=$(curl -sS -I --max-time 15 "https://$domain/api/_health" 2>/dev/null \
+		| sed -n 's/^[Xx]-[Ff]luxer-[Vv]ersion: *//p' | tr -d '\r') || ver=''
+	printf 'version    %s\n' "${ver:-unknown}"
+
+	expected=$(compose config --services 2>/dev/null | grep -vc '^seaweedfs-init$' || echo '?')
+	running=$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
+	printf 'services   %s/%s running\n' "${running:-0}" "$expected"
+
+	unhealthy=$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null \
+		| grep -v '^seaweedfs-init ' | grep -Ev ' Up .*healthy| Up [0-9]' || true)
+	if [ -n "$unhealthy" ]; then
+		printf 'PROBLEM    %s\n' "$(printf '%s' "$unhealthy" | tr '\n' ';')"
+	fi
+
+	if iptables_ok; then
+		printf 'iptables   DOCKER chain present\n'
+	else
+		printf 'iptables   DOCKER CHAIN MISSING - run: sudo systemctl restart docker\n'
+	fi
+
+	printf 'disk       %s free of %s\n' \
+		"$(df -h "$FLUXER_DIR" | awk 'NR==2{print $4}')" \
+		"$(df -h "$FLUXER_DIR" | awk 'NR==2{print $2}')"
+
+	b=$(newest_backup || true)
+	if [ -n "${b:-}" ]; then
+		printf 'last backup %s (%s, %s old)\n' "$(basename "$b")" \
+			"$(du -sh "$b" 2>/dev/null | cut -f1)" \
+			"$(python3 -c "
+import os,sys,time
+age=time.time()-os.path.getmtime(sys.argv[1])
+h=int(age//3600)
+print(f'{h//24}d {h%24}h' if h>=24 else f'{h}h')" "$b" 2>/dev/null || echo '?')"
+	else
+		printf 'last backup none found\n'
+	fi
+}
+
+iptables_ok() {
+	sudo -n iptables -t nat -L -n 2>/dev/null | grep -q '^Chain DOCKER' \
+		|| iptables -t nat -L -n 2>/dev/null | grep -q '^Chain DOCKER'
+}
+
+cmd_backups() {
+	printf '%-34s %8s  %-18s %s\n' 'BACKUP' 'SIZE' 'CONTENTS' 'WHERE'
+	all_backup_dirs | while read -r d; do
+		what=''
+		[ -f "$d/fluxer.dump" ] && what="db"
+		[ -f "$d/seaweedfs-data.tgz" ] && what="${what:+$what+}uploads"
+		[ -f "$d/.env" ] || [ -f "$d/env.backup" ] && what="${what:+$what+}env"
+		case "$d" in
+			"$BACKUP_ROOT"/*) where='scheduled' ;;
+			*) where='pre-upgrade' ;;
+		esac
+		printf '%-34s %8s  %-18s %s\n' "$(basename "$d")" \
+			"$(du -sh "$d" | cut -f1)" "${what:-(empty)}" "$where"
+	done
+}
+
+# Restore the newest dump into a scratch database to prove it actually works.
+# Never touches the live database.
+cmd_verify_backup() {
+	b=$(newest_backup || true)
+	[ -n "${b:-}" ] || die "no backup with a fluxer.dump found in $BACKUP_ROOT"
+	echo "Verifying $(basename "$b")"
+	echo "Restoring into scratch database 'fluxer_verify' (the live database is untouched)."
+
+	compose exec -T postgres psql -U fluxer -d postgres -q \
+		-c 'DROP DATABASE IF EXISTS fluxer_verify;' \
+		-c 'CREATE DATABASE fluxer_verify OWNER fluxer;' 2>&1 \
+		| grep -v '^NOTICE:' || true
+
+	ok=0
+	if compose exec -T postgres pg_restore -U fluxer -d fluxer_verify --no-owner < "$b/fluxer.dump" > /dev/null 2>&1; then
+		ok=1
+	fi
+
+	rows=$(compose exec -T postgres psql -U fluxer -d fluxer_verify -At \
+		-c 'select count(*) from fluxer_kv;' 2>/dev/null | tr -d '\r' || echo 0)
+	live=$(compose exec -T postgres psql -U fluxer -d fluxer -At \
+		-c 'select count(*) from fluxer_kv;' 2>/dev/null | tr -d '\r' || echo 0)
+
+	compose exec -T postgres psql -U fluxer -d postgres -q \
+		-c 'DROP DATABASE IF EXISTS fluxer_verify;' > /dev/null
+	echo "Scratch database dropped."
+
+	echo
+	printf 'restored rows %s\n' "$rows"
+	printf 'live rows     %s\n' "$live"
+	if [ "$ok" -eq 1 ] && [ "${rows:-0}" -gt 0 ]; then
+		echo "PASS  this backup restores."
+		return 0
+	fi
+	echo "FAIL  this backup did NOT restore cleanly." >&2
+	return 1
+}
+
+cmd_restore() {
+	src=${1:-}
+	if [ -z "$src" ]; then
+		echo "Pick a backup:"; echo
+		cmd_backups
+		echo
+		die "usage: fluxer restore <backup-dir-name>"
+	fi
+	case "$src" in
+		/*) d=$src ;;
+		*) if [ -d "$BACKUP_ROOT/$src" ]; then d="$BACKUP_ROOT/$src"
+		   else d="$FLUXER_DIR/backups/$src"; fi ;;
+	esac
+	[ -d "$d" ] || die "no such backup: $src"
+	[ -f "$d/fluxer.dump" ] || die "no fluxer.dump in $d"
+
+	cat <<WARN
+
+This REPLACES the live instance with $(basename "$d"):
+  - the database is dropped and restored from fluxer.dump
+$([ -f "$d/seaweedfs-data.tgz" ] && echo "  - uploads are wiped and restored from seaweedfs-data.tgz")
+  - the stack is stopped and restarted
+
+Everything written since that backup is lost.
+WARN
+	printf "Type 'restore' to proceed: "
+	read -r reply
+	[ "$reply" = "restore" ] || { echo "Aborted."; exit 0; }
+
+	echo "Restoring the database."
+	compose up -d postgres > /dev/null
+	compose exec -T postgres psql -U fluxer -d postgres -q \
+		-c 'DROP DATABASE IF EXISTS fluxer;' -c 'CREATE DATABASE fluxer OWNER fluxer;' > /dev/null
+	compose exec -T postgres pg_restore -U fluxer -d fluxer --no-owner < "$d/fluxer.dump"
+
+	if [ -f "$d/seaweedfs-data.tgz" ]; then
+		echo "Restoring uploads."
+		compose down > /dev/null 2>&1
+		docker run --rm -v fluxer_seaweedfs-data:/data -v "$d:/backup:ro" alpine:3.22 \
+			sh -c 'rm -rf /data/* && tar xzf /backup/seaweedfs-data.tgz -C /data'
+	fi
+
+	echo "Starting the stack."
+	compose up -d > /dev/null
+	echo
+	"$OPS/check.sh"
+}
+
+cmd=${1:-help}
+[ $# -gt 0 ] && shift || true
+
+case "$cmd" in
+	status) cmd_status ;;
+	check) exec "$OPS/check.sh" "$@" ;;
+	update) exec "$OPS/update.sh" "$@" ;;
+	backup) exec "$OPS/backup.sh" "$@" ;;
+	backups) cmd_backups ;;
+	verify-backup | verify) cmd_verify_backup ;;
+	restore) cmd_restore "$@" ;;
+	rollback) (cd "$FLUXER_DIR" && exec sh install.sh --rollback --dir "$FLUXER_DIR") ;;
+	logs) compose logs "$@" ;;
+	up) compose up -d "$@" ;;
+	down) compose down "$@" ;;
+	restart) compose restart "$@" ;;
+	ps) compose ps "$@" ;;
+	help | --help | -h) usage ;;
+	*) printf 'unknown command: %s\n\n' "$cmd" >&2; usage >&2; exit 2 ;;
+esac

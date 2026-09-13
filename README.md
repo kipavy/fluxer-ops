@@ -8,6 +8,41 @@ scheduled backups. These scripts fill that gap.
 
 Deployed at: `/home/ubuntu/Documents/fluxer` (scripts live in `ops/`).
 
+## The `fluxer` command
+
+One entry point, on `PATH` via a symlink in `~/.local/bin`, so it works from any
+directory:
+
+```
+fluxer status              What is running, disk, last backup, health at a glance
+fluxer check               Full health check: endpoints, WebSocket, containers
+fluxer logs [svc] [-f]     Tail logs, all services or one
+fluxer up | down | restart [svc] | ps
+
+fluxer update [--check]    Update safely: preflight, plan, apply, verify
+fluxer rollback            Go back to the previous release
+
+fluxer backup              Take a backup now
+fluxer backups             List every backup, ours and the installer's
+fluxer verify-backup       Prove the newest dump restores, into a scratch database
+fluxer restore <dir>       Restore from a backup (destructive, asks first)
+```
+
+It is a **thin dispatcher**, not a rewrite: it delegates to the scripts below,
+which are tested independently and are what cron calls directly. Nothing is
+duplicated, so there is no second copy to drift.
+
+`verify-backup` is the one worth knowing about. It restores the newest dump into a
+throwaway `fluxer_verify` database, counts rows, compares against live, and drops
+it. The live database is never touched. This is what turns "we have backups" into
+"the backups demonstrably restore".
+
+To install the symlink on a fresh host:
+
+```sh
+ln -sf /home/ubuntu/Documents/fluxer/ops/fluxer ~/.local/bin/fluxer
+```
+
 ## Scripts
 
 | Script | Run by | What it does |
@@ -71,8 +106,10 @@ migrations are not reverted by a rollback.
 
 ## Restoring from a backup
 
-> Not rehearsed end to end. The dumps are verified readable with `pg_restore --list`,
-> but a full restore has never been performed on this instance.
+> The database half is **verified**: `fluxer verify-backup` restores the newest dump
+> into a scratch database and compares row counts against live. As of 2026-09-13 it
+> restored 568,748 rows matching live exactly. The **uploads** half has still never
+> been restored end to end, and `fluxer restore` itself has not been run in anger.
 
 ```sh
 cd /home/ubuntu/Documents/fluxer
