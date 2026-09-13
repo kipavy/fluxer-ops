@@ -194,6 +194,120 @@ phase_tools() {
 	die 2 "Install what is missing above, then run this again."
 }
 
+# --- phase 2: the instance ------------------------------------------------------
+
+PORTS='80/tcp 443/tcp 7881/tcp 7882/udp'
+BEHIND_CF=0
+
+valid_domain() {
+	printf '%s' "$1" | grep -Eq '^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$'
+}
+valid_email() {
+	printf '%s' "$1" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
+}
+
+ask_domain_email() {
+	while ! valid_domain "$DOMAIN"; do
+		[ -z "$DOMAIN" ] || st_bad "not a domain name: $DOMAIN"
+		[ "$ASSUME_YES" -eq 0 ] || die 2 "--yes needs --domain, e.g. --domain chat.example.com"
+		DOMAIN=$(prompt "Domain for the instance (e.g. chat.example.com)")
+	done
+	while ! valid_email "$EMAIL"; do
+		[ -z "$EMAIL" ] || st_bad "not an email address: $EMAIL"
+		[ "$ASSUME_YES" -eq 0 ] || die 2 "--yes needs --email (for the certificate and the instance's own mail)"
+		EMAIL=$(prompt "Your email (certificate notices, instance mail)")
+	done
+}
+
+public_ip() {
+	_ip=$(curl -fsS --max-time 10 "${PUBLIC_IP_URL:-https://1.1.1.1/cdn-cgi/trace}" 2> /dev/null | sed -n 's/^ip=//p' | head -n 1)
+	[ -n "$_ip" ] || _ip=$(curl -fsS --max-time 10 https://api.ipify.org 2> /dev/null || true)
+	printf '%s' "$_ip"
+}
+
+resolve4() {
+	getent ahostsv4 "$1" 2> /dev/null | awk '{print $1}' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+
+# dns_verdict <public ip> <resolved ips> <file of Cloudflare CIDRs>
+dns_verdict() {
+	[ -n "$2" ] || { echo none; return 0; }
+	for _ip in $2; do [ "$_ip" = "$1" ] && { echo here; return 0; }; done
+	# shellcheck disable=SC2086 # $2 is a list of addresses
+	if python3 - "$3" $2 <<'PY'
+import ipaddress, sys
+nets = [ipaddress.ip_network(l.strip()) for l in open(sys.argv[1]) if l.strip()]
+addrs = [ipaddress.ip_address(a) for a in sys.argv[2:]]
+sys.exit(0 if nets and all(any(a in n for n in nets) for a in addrs) else 1)
+PY
+	then echo cloudflare; else echo elsewhere; fi
+}
+
+phase_dns() {
+	_ip=$(public_ip)
+	if [ -z "$_ip" ]; then
+		st_skip "could not learn this server's public IP; DNS not checked"
+		return 0
+	fi
+	curl -fsS --max-time 10 "${CF_IPS_URL:-https://www.cloudflare.com/ips-v4}" > "$TMP/cf-v4" 2> /dev/null || : > "$TMP/cf-v4"
+	while :; do
+		case "$(dns_verdict "$_ip" "$(resolve4 "$DOMAIN")" "$TMP/cf-v4")" in
+			here)
+				st_ok "$DOMAIN points at this server ($_ip)"
+				return 0
+				;;
+			cloudflare)
+				st_ok "$DOMAIN is proxied through Cloudflare"
+				say "    If the certificate is not issued, switch the record to \"DNS only\" until it is,"
+				say "    then back, with SSL/TLS mode \"Full (strict)\"."
+				BEHIND_CF=1
+				return 0
+				;;
+		esac
+		st_bad "$DOMAIN does not point at this server yet"
+		say "    Create this record where the domain's DNS is managed:"
+		say "        A    $DOMAIN    $_ip"
+		[ "$ASSUME_YES" -eq 0 ] || die 2 "DNS for $DOMAIN does not point at $_ip. Fix the record, then run this again."
+		printf '    Enter to check again (a new record can take a few minutes), or type skip: '
+		read -r _reply || _reply=skip
+		if [ "$_reply" = skip ]; then
+			st_skip "DNS: no certificate can be issued until $DOMAIN points at $_ip"
+			return 0
+		fi
+	done
+}
+
+# cloud_provider: "name|where its firewall is|docs", or nothing when unknown.
+cloud_provider() {
+	_d=${DMI_DIR:-/sys/class/dmi/id}
+	_v=$(cat "$_d/sys_vendor" "$_d/chassis_asset_tag" "$_d/product_name" 2> /dev/null | tr '\n' ' ')
+	case "$_v" in
+		*OracleCloud*) echo 'Oracle Cloud|the VCN security list: Networking > Virtual cloud networks > your VCN > Security Lists > Add Ingress Rules|https://docs.oracle.com/en-us/iaas/Content/Network/Concepts/securitylists.htm' ;;
+		*Amazon*) echo 'AWS|the instance security group: EC2 > Security Groups > Inbound rules|https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/working-with-security-groups.html' ;;
+		*Google*) echo 'Google Cloud|a VPC firewall rule: VPC network > Firewall|https://cloud.google.com/firewall/docs/using-firewalls' ;;
+		*Microsoft*) echo 'Azure|the network security group: Networking > Inbound port rules|https://learn.microsoft.com/azure/virtual-network/network-security-groups-overview' ;;
+		*Hetzner*) echo 'Hetzner|the Cloud Firewall attached to the server, if any|https://docs.hetzner.com/cloud/firewalls/getting-started/creating-a-firewall' ;;
+		*DigitalOcean*) echo 'DigitalOcean|the Cloud Firewall attached to the droplet, if any|https://docs.digitalocean.com/products/networking/firewalls/' ;;
+		*Scaleway*) echo 'Scaleway|the instance security group|https://www.scaleway.com/en/docs/instances/how-to/use-security-groups/' ;;
+	esac
+}
+
+phase_ports() {
+	say "    Fluxer needs these ports open to the internet: $PORTS"
+	_p=$(cloud_provider)
+	if [ -n "$_p" ]; then
+		_name=${_p%%|*}
+		_rest=${_p#*|}
+		say "    On $_name that is ${_rest%%|*}:"
+		say "    ${_rest#*|}"
+	else
+		say "    If your hosting provider has a firewall in its web console, open them there."
+	fi
+	say "    Docker takes care of this server's own firewall. The provider's cannot be seen from here."
+	[ "$ASSUME_YES" -eq 1 ] && return 0
+	ask "Are they open?" y || die 2 "Open them, then run this again."
+}
+
 # --- phase 3: core wiring -----------------------------------------------------
 
 cron_list() {

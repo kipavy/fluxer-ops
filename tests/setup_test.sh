@@ -227,4 +227,45 @@ EOF
   fi
   finish )
 
+# --- pre-flight
+( load
+  for d in chat.example.com a.b.co x-y.example.org; do valid_domain "$d" && pass "domain ok: $d" || fail "domain ok: $d"; done
+  for d in '' localhost 'a b.com' -a.com http://x.com; do valid_domain "$d" && fail "domain rejected: [$d]" || pass "domain rejected: [$d]"; done
+  valid_email me@example.com && pass "email ok" || fail "email ok"
+  for e in '' me@ me@localhost 'a b@c.d'; do valid_email "$e" && fail "email rejected: [$e]" || pass "email rejected: [$e]"; done
+
+  printf '173.245.48.0/20\n188.114.96.0/20\n' > "$tmp/cf"
+  assert_eq "points here" here "$(dns_verdict 1.2.3.4 '1.2.3.4' "$tmp/cf")"
+  assert_eq "proxied" cloudflare "$(dns_verdict 1.2.3.4 '188.114.96.6 188.114.97.6' "$tmp/cf")"
+  assert_eq "elsewhere" elsewhere "$(dns_verdict 1.2.3.4 '5.6.7.8' "$tmp/cf")"
+  assert_eq "mixed is elsewhere" elsewhere "$(dns_verdict 1.2.3.4 '188.114.96.6 5.6.7.8' "$tmp/cf")"
+  assert_eq "no record" none "$(dns_verdict 1.2.3.4 '' "$tmp/cf")"
+  : > "$tmp/cf-empty"
+  assert_eq "no Cloudflare list: elsewhere" elsewhere "$(dns_verdict 1.2.3.4 '188.114.96.6' "$tmp/cf-empty")"
+
+  mkdir -p "$tmp/dmi"
+  printf 'QEMU\n' > "$tmp/dmi/sys_vendor"; printf 'OracleCloud.com\n' > "$tmp/dmi/chassis_asset_tag"
+  assert_contains "Oracle from the asset tag" "Oracle Cloud|" "$(DMI_DIR="$tmp/dmi" cloud_provider)"
+  printf 'Hetzner\n' > "$tmp/dmi/sys_vendor"; : > "$tmp/dmi/chassis_asset_tag"
+  assert_contains "Hetzner" "Hetzner" "$(DMI_DIR="$tmp/dmi" cloud_provider)"
+  printf 'LENOVO\n' > "$tmp/dmi/sys_vendor"
+  assert_eq "unknown vendor" "" "$(DMI_DIR="$tmp/dmi" cloud_provider)"
+
+  out=$(DMI_DIR="$tmp/dmi" ASSUME_YES=1 phase_ports)
+  assert_contains "ports listed" "80/tcp 443/tcp 7881/tcp 7882/udp" "$out"
+
+  # DNS loop: wrong record, then fixed on the second check.
+  printf 'ip=1.2.3.4\n' > "$tmp/trace"
+  PUBLIC_IP_URL="file://$tmp/trace" CF_IPS_URL="file://$tmp/cf" DOMAIN=chat.example.test ASSUME_YES=0
+  TMP="$tmp/t"; mkdir -p "$TMP"
+  printf '%s\n' 5.6.7.8 1.2.3.4 > "$tmp/answers"
+  resolve4() { _a=$(head -n 1 "$tmp/answers"); sed -i 1d "$tmp/answers"; printf '%s' "$_a"; }
+  out=$(printf '\n' | phase_dns)
+  assert_contains "shows the record to create" "A    chat.example.test    1.2.3.4" "$out"
+  assert_contains "passes once fixed" "✓ chat.example.test points at this server" "$out"
+
+  printf '%s\n' 5.6.7.8 > "$tmp/answers"
+  rc=0; ( ASSUME_YES=1; phase_dns > /dev/null 2>&1 ) || rc=$?; assert_eq "--yes with a wrong record exits 2" 2 "$rc"
+  finish )
+
 finish
