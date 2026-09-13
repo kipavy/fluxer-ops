@@ -21,7 +21,8 @@ fluxer up | down | restart [svc] | ps
 
 fluxer update [--check]    Update safely: preflight, plan, apply, verify
 fluxer rollback            Go back to the previous release
-fluxer badge-patch         Re-apply the Plutonium badge patch (--revert to undo)
+fluxer premium <user>      Grant Plutonium + the Visionary badge (--off revokes)
+fluxer badge-patch         Re-apply just the client-side badge patch
 
 fluxer backup              Take a backup now
 fluxer backups             List every backup, ours and the installer's
@@ -52,7 +53,8 @@ ln -sf /home/ubuntu/Documents/fluxer/ops/fluxer ~/.local/bin/fluxer
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, and brings the stack up if services are missing. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
-| `badge-patch.sh` | `update.sh`, and you | Patches the web bundle so the Plutonium badge renders on a self-hosted instance. `--revert` undoes it. |
+| `premium.sh` | you | Grants or revokes Plutonium on an account and applies the badge patch if needed. One command, start to finish. |
+| `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Plutonium badge renders on a self-hosted instance. `--revert` undoes it. |
 
 ## Install on a fresh host
 
@@ -107,6 +109,15 @@ Rollback needs the previous images still on disk, so do not run
 migrations are not reverted by a rollback.
 
 ## The Plutonium badge patch
+
+On a fresh instance, from nothing to a badge:
+
+```sh
+fluxer premium <username>   # sets the account up and applies the patch
+```
+
+then reload the client. The rest of this section is why that second half is needed
+at all, and what it does.
 
 The premium badge is hidden on self-hosted instances by the **client**, not by the
 API. `UserProfileBadges.tsx` reads:
@@ -174,27 +185,47 @@ a working app without the badge -- and says so.
 Anything else that changes the app image needs `fluxer badge-patch` by hand. A
 re-run on unchanged content republishes to the same URL, so it is safe any time.
 
-### Badge variant
-
-Which badge renders comes from `premium_type` on the user row: `1` (subscription)
-gives the Plutonium badge with a "subscriber since" tooltip, `2` (lifetime) gives
-**Visionary** plus a `#N` sequence badge from `premium_lifetime_sequence`. No admin
-endpoint sets it -- `/admin/users/:id/premium-flags` only toggles the `PremiumFlags`
-bits -- so it is a direct row edit:
+### Granting it: `fluxer premium`
 
 ```sh
-docker compose exec -T postgres psql -U fluxer -d fluxer -c "
-update fluxer_kv
-set row_data = jsonb_set(
-      jsonb_set(row_data, '{premium_type}', '2'::jsonb),
-      '{version}', ((row_data->>'version')::int + 1)::text::jsonb),
-    updated_at = now()
-where table_name = 'users' and row_data->>'username' = 'your_username';"
+fluxer premium <username>               # Visionary badge (lifetime)
+fluxer premium <username> --subscriber  # "subscriber since" badge instead
+fluxer premium <username> --off         # revoke
+fluxer premium --list                   # who has premium
 ```
 
-`version` is the row's optimistic-concurrency counter and must be bumped with any
-hand edit. Nothing caches user rows (the repository reads Postgres per request), so
-a client reload is enough -- no restart.
+That is the whole flow -- it applies the badge patch itself if it is not on yet, so
+a fresh instance needs one command and a page reload.
+
+It writes the row directly, which is not laziness: the badge renders off
+`premium_type` (`1` subscription, `2` lifetime, plus `premium_lifetime_sequence`
+for the Visionary `#N`), and there is **no API for that field** -- 
+`/admin/users/:id/premium-flags` only toggles `PremiumFlags` bits. So the admin
+panel's premium override gets you the perks with `premium_type` still at `0`: no
+badge. Doing the override flag in the same statement also means you do not need the
+`STAFF` flag on your own account to grant premium to yourself.
+
+What a grant sets:
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `premium_type` | `2`, or `1` with `--subscriber` | what the badge renders from |
+| `premium_lifetime_sequence` | next free number, existing one kept | the Visionary `#N` |
+| `premium_flags` | `ENABLED_OVERRIDE` on; `PERKS_DISABLED`, `BADGE_HIDDEN`, `BADGE_MASKED` off | the perks, and nothing left suppressing or downgrading the badge |
+| `premium_since` | now, if not already set | the "since" in the tooltip |
+| `premium_until` | **removed** | absent means never expires to both the server (`checkHasActivePaidPremium`) and the client (`isPremiumExpiredLocally`), so no sweep strips it later |
+| `version` | `+1` | the row's optimistic-concurrency counter, bumped as the app would |
+
+Values go in using the KV store's own encoding -- dates as
+`{"value": ..., "__fluxer_type": "date"}`, plain numbers bare. Rows are addressed by
+numeric user id, never by an interpolated username, and usernames are validated
+before they reach a query. Nothing caches user rows (the repository reads Postgres
+per request), so a client reload is enough -- no restart.
+
+`--off` mirrors the api's own `PREMIUM_CLEAR_FIELDS` and deliberately leaves
+`premium_lifetime_sequence` alone: a Visionary ID is an identity, not an
+entitlement. It also leaves the badge patch in place, since other accounts may be
+using it.
 
 ## Restoring from a backup
 

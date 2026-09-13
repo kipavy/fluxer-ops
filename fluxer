@@ -23,7 +23,11 @@ fluxer - operate the self-hosted Fluxer instance
   fluxer update [--check]    Update safely: preflight, plan, apply, verify
   fluxer rollback            Go back to the previous release
 
-  fluxer badge-patch         Re-apply the Plutonium badge patch to the bundle
+  fluxer premium <user>      Grant Plutonium + the Visionary badge, patch included
+             [--subscriber]  "subscriber since" badge instead of Visionary
+             [--off]         Revoke it
+             [--list]        Who has premium
+  fluxer badge-patch         Re-apply just the client-side badge patch
              [--revert]      Drop it and go back to the stock bundle
 
   fluxer backup              Take a backup now
@@ -208,6 +212,7 @@ case "$cmd" in
 	status) cmd_status ;;
 	check) exec "$OPS/check.sh" "$@" ;;
 	update) exec "$OPS/update.sh" "$@" ;;
+	premium) exec "$OPS/premium.sh" "$@" ;;
 	badge-patch) exec "$OPS/badge-patch.sh" "$@" ;;
 	backup) exec "$OPS/backup.sh" "$@" ;;
 	backups) cmd_backups ;;
