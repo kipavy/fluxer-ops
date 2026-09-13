@@ -15,8 +15,9 @@ Success criteria:
 - The README's install section is: "you need a server and a domain, then paste this".
 - No script in the repo contains a hardcoded `/home/ubuntu` path.
 - Every failure a newcomer can realistically hit before the stack is up (no Docker,
-  DNS not pointing here, ports closed, not in the docker group, running as root) is
-  caught **before** the 3.5 GB pull, with the exact fix printed.
+  DNS not pointing here, ports closed at the provider, not in the docker group,
+  running as root) is caught or explained **before** the 3.5 GB pull, with the fix
+  printed.
 - Re-running the one-liner on a configured host changes nothing and says so.
 - This host (`/home/ubuntu/Documents/fluxer`) keeps working with no config change.
 
@@ -104,8 +105,7 @@ Every step prints a status line (`✓` done / already present, `→` doing, `✗
    `sha256sum`: missing ones are listed with the install command for the detected
    package manager; exits 2. Not installed automatically.
 4. **sudo.** Probed with `sudo -v` (prompts for a password, which is fine
-   interactively). Unavailable: the root-only steps (watchdog cron, host firewall,
-   firewall-fix) are marked `–` with one line on what that costs, and setup
+   interactively). Unavailable: the root-only steps (watchdog cron, firewall-fix) are marked `–` with one line on what that costs, and setup
    continues.
 
 ### Phase 2: the instance
@@ -127,9 +127,9 @@ No instance: guided install.
      (`A  <domain>  <ip>`), then loops "Press Enter to re-check, or type skip".
      Skip continues with a warning that the certificate will not be issued until it
      is fixed. `--yes` with a wrong record exits 2.
-3. **Ports on the host.** For 80/tcp, 443/tcp, 7881/tcp, 7882/udp: if firewalld is
-   active, or ufw is active, lists which are closed and offers to open them (sudo).
-   Raw iptables rules are only reported, never edited.
+3. **Ports on the host: not touched.** Docker publishes the stack's ports ahead of
+   ufw and firewalld (its own nat and forward rules), so a host firewall is not what
+   blocks a first install. Setup says so in one line instead of editing it.
 4. **Ports at the cloud provider.** Detected from `/sys/class/dmi/id/sys_vendor` and
    `chassis_asset_tag` (Oracle Cloud, Amazon EC2, Google, Microsoft/Azure, Hetzner,
    DigitalOcean, Scaleway; unknown otherwise). Prints the four ports and where they
