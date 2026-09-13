@@ -111,7 +111,7 @@ load() {
 #!/bin/sh
 case "$*" in
 	"compose version --short") echo "${COMPOSE_V:-2.26.1}" ;;
-	info) exit 0 ;;
+	info) exit "${DOCKER_INFO_RC:-0}" ;;
 	version*) echo 27.0.0 ;;
 esac
 EOF
@@ -133,6 +133,98 @@ EOF
   rc=0; ( printf 'n\n' | phase_docker '' > "$tmp/o" 2>&1 ) || rc=$?
   assert_eq "declined docker install exits 2" 2 "$rc"
   assert_contains "points at the docs" "docs.docker.com" "$(cat "$tmp/o")"
+  finish )
+
+# --- phase_docker: the docker-group branch (not-in-group, stale login, usermod, sg re-exec)
+( load
+  if [ "$(id -u)" -eq 0 ]; then
+    pass "docker-group branch skipped (running as root)"
+  else
+    # A real docker stub that answers "info" per test (DOCKER_INFO_RC), plus
+    # getent/usermod/sg stubs that record their argv instead of touching the
+    # host. Prepended to PATH, never replacing it: cut/tr/grep/id stay real.
+    mkdir -p "$tmp/d" "$tmp/bin" "$tmp/calls"
+    cat > "$tmp/d/docker" <<'EOF'
+#!/bin/sh
+case "$*" in
+	"compose version --short") echo "${COMPOSE_V:-2.26.1}" ;;
+	info) exit "${DOCKER_INFO_RC:-0}" ;;
+	version*) echo 27.0.0 ;;
+esac
+EOF
+    chmod +x "$tmp/d/docker"
+    cat > "$tmp/bin/getent" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/calls/getent"
+case "\$*" in
+	"group docker") printf 'docker:x:999:%s\n' "\${GETENT_DOCKER_MEMBERS:-}" ;;
+	*) exit 2 ;;
+esac
+EOF
+    chmod +x "$tmp/bin/getent"
+    cat > "$tmp/bin/usermod" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/calls/usermod"
+EOF
+    chmod +x "$tmp/bin/usermod"
+    cat > "$tmp/bin/sg" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$tmp/calls/sg"
+EOF
+    chmod +x "$tmp/bin/sg"
+    DOCKER="$tmp/d/docker"
+    _me=$(id -un)
+
+    # (a) docker info fails, not in the group, --check: reported and counted, no usermod
+    # assert_* run outside the subshell below: fails they record would
+    # otherwise not reach this group's own finish (subshells don't share it back).
+    rm -f "$tmp/calls/usermod"
+    ( PATH="$tmp/bin:$PATH"; export PATH
+      DOCKER_INFO_RC=1 GETENT_DOCKER_MEMBERS=''; export DOCKER_INFO_RC GETENT_DOCKER_MEMBERS
+      CHECK_ONLY=1 MISSING=0
+      phase_docker '' > "$tmp/o1" 2>&1
+      echo "$MISSING" > "$tmp/missing1"
+    )
+    assert_contains "not-in-group reported under --check" "not in the docker group" "$(cat "$tmp/o1")"
+    assert_eq "not-in-group counts as missing" 1 "$(cat "$tmp/missing1")"
+    [ -e "$tmp/calls/usermod" ] && fail "check mode ran usermod" || pass "check mode ran no usermod"
+
+    # (b) same, interactive, declined: exits 2, no usermod
+    rm -f "$tmp/calls/usermod"
+    rc=0
+    ( PATH="$tmp/bin:$PATH"; export PATH
+      DOCKER_INFO_RC=1 GETENT_DOCKER_MEMBERS=''; export DOCKER_INFO_RC GETENT_DOCKER_MEMBERS
+      CHECK_ONLY=0 ASSUME_YES=0 SUDO_OK=1
+      printf 'n\n' | phase_docker '' > "$tmp/o2" 2>&1
+    ) || rc=$?
+    assert_eq "declined docker-group add exits 2" 2 "$rc"
+    [ -e "$tmp/calls/usermod" ] && fail "declined add ran usermod" || pass "declined add ran no usermod"
+
+    # (c) same, interactive, accepted: usermod once, then sg re-exec with the
+    # original arguments intact (the space in "my domain" proves quote_cmd's
+    # round trip survives usermod -> exec sg).
+    rm -f "$tmp/calls/usermod" "$tmp/calls/sg"
+    ( PATH="$tmp/bin:$PATH"; export PATH
+      DOCKER_INFO_RC=1 GETENT_DOCKER_MEMBERS=''; export DOCKER_INFO_RC GETENT_DOCKER_MEMBERS
+      CHECK_ONLY=0 ASSUME_YES=0 SUDO_OK=1
+      printf 'y\n' | phase_docker "$(quote_cmd --domain 'my domain')" > "$tmp/o3" 2>&1
+    )
+    assert_eq "accepted add calls usermod once" 1 "$(wc -l < "$tmp/calls/usermod" 2> /dev/null || echo 0)"
+    assert_contains "usermod adds this user to docker" "-aG docker $_me" "$(cat "$tmp/calls/usermod" 2> /dev/null)"
+    assert_contains "sg re-exec carries the original args intact" "my domain" "$(cat "$tmp/calls/sg" 2> /dev/null)"
+
+    # (d) SETUP_SG=1 already set, docker info still fails, user already in the
+    # group: dies instead of re-execing, so there is no exec loop.
+    rm -f "$tmp/calls/sg"
+    rc=0
+    ( PATH="$tmp/bin:$PATH"; export PATH
+      DOCKER_INFO_RC=1 GETENT_DOCKER_MEMBERS=$_me; export DOCKER_INFO_RC GETENT_DOCKER_MEMBERS
+      CHECK_ONLY=0 ASSUME_YES=0 SUDO_OK=1 SETUP_SG=1
+      phase_docker '' > "$tmp/o4" 2>&1
+    ) || rc=$?
+    assert_eq "stale SETUP_SG dies instead of looping" 2 "$rc"
+    [ -e "$tmp/calls/sg" ] && fail "stale SETUP_SG re-exec'd sg" || pass "stale SETUP_SG never re-exec'd"
+  fi
   finish )
 
 finish

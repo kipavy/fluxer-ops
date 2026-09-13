@@ -162,6 +162,9 @@ phase_docker() {
 		as_root usermod -aG docker "$_me"
 		st_ok "$_me added to the docker group"
 	fi
+	# sg re-runs this script with the new group active, without a fresh login.
+	# Without sg itself, "exec: sg: not found" would be the last word instead.
+	command -v sg > /dev/null 2>&1 || die 2 "Log out and back in to pick up the docker group, then run this again."
 	st_do "continuing with the docker group (no need to log in again)"
 	SETUP_SG=1 exec sg docker -c "SETUP_SG=1 sh $(quote_cmd "$SELF") $1"
 }
