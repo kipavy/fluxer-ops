@@ -205,6 +205,35 @@ WARN
 	"$OPS/check.sh"
 }
 
+# A rollback swaps the app image back to the previous release, so a badge patch
+# taken from the newer one must come off first: its index.html names chunks the
+# older image does not have, which leaves the page loading nothing at all. Same
+# reasoning as update.sh, which does this around an update.
+cmd_rollback() {
+	patched=0
+	if [ -f "$FLUXER_DIR/docker-compose.override.yml" ] \
+		&& grep -q 'badge-patch.sh' "$FLUXER_DIR/docker-compose.override.yml"; then
+		patched=1
+		echo "Taking the Plutonium badge patch off before rolling back."
+		"$OPS/badge-patch.sh" --revert
+	fi
+
+	rc=0
+	(cd "$FLUXER_DIR" && sh install.sh --rollback --dir "$FLUXER_DIR") || rc=$?
+
+	if [ "$patched" -eq 1 ]; then
+		if [ "$rc" -eq 0 ]; then
+			echo
+			echo "Re-applying the badge patch to the rolled-back bundle."
+			"$OPS/badge-patch.sh" \
+				|| echo "WARNING: the badge patch did not re-apply. Run: fluxer badge-patch" >&2
+		else
+			echo "The badge patch is OFF. Re-apply with 'fluxer badge-patch' once this is sorted." >&2
+		fi
+	fi
+	return "$rc"
+}
+
 cmd=${1:-help}
 [ $# -gt 0 ] && shift || true
 
@@ -218,7 +247,7 @@ case "$cmd" in
 	backups) cmd_backups ;;
 	verify-backup | verify) cmd_verify_backup ;;
 	restore) cmd_restore "$@" ;;
-	rollback) (cd "$FLUXER_DIR" && exec sh install.sh --rollback --dir "$FLUXER_DIR") ;;
+	rollback) cmd_rollback ;;
 	logs) compose logs "$@" ;;
 	up) compose up -d "$@" ;;
 	down) compose down "$@" ;;

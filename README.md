@@ -49,7 +49,7 @@ ln -sf /home/ubuntu/Documents/fluxer/ops/fluxer ~/.local/bin/fluxer
 
 | Script | Run by | What it does |
 | --- | --- | --- |
-| `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, and container health. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
+| `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, container health, and that every script the app shell names resolves. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, and brings the stack up if services are missing. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
@@ -176,14 +176,30 @@ manifest, so the service worker caches a file nothing loads.
 ### Keeping it applied
 
 The mounted `index.html` names a release-specific chunk, so it must **not** stay
-mounted across an update: the new image would be served an `index.html` pointing at
-chunks it no longer has, which breaks the app rather than just losing the badge.
-`update.sh` therefore reverts the patch before applying an update and re-applies it
-after the health checks pass. If the update itself fails it leaves the patch off --
-a working app without the badge -- and says so.
+mounted while the app image changes underneath it. `install.sh --update` finishes
+with `compose pull` and `compose up -d`, and the override joins every compose
+command, so the new image would be served an `index.html` pointing at chunks it
+does not have -- the page answers 200 and the app loads nothing. So:
+
+- **`fluxer update`** reverts the patch before applying, re-applies after the
+  health checks pass, and if the update itself fails leaves the patch off and says
+  so. Off is a working app without the badge.
+- **`fluxer rollback`** does the same around `install.sh --rollback`, for the mirror
+  image of the problem: a patch built from the newer release names chunks the older
+  one never had.
+- **`fluxer check`** verifies every `<script src>` in the served shell resolves, so
+  this breakage is caught however it arises -- including someone running
+  `install.sh` directly, around the patch. That check is the reason it is in
+  `check.sh` and not only in `update.sh`: the watchdog runs `check.sh` every ten
+  minutes, so a broken shell surfaces on its own rather than waiting to be noticed.
 
 Anything else that changes the app image needs `fluxer badge-patch` by hand. A
 re-run on unchanged content republishes to the same URL, so it is safe any time.
+
+Worth knowing: **app-proxy reads `index.html` once at startup** and templates it
+per request from memory, so editing the mounted file changes nothing until the
+container is recreated. `badge-patch.sh` always recreates it; a hand edit will look
+like it did nothing.
 
 ### Granting it: `fluxer premium`
 

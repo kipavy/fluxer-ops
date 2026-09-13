@@ -67,6 +67,30 @@ else
 	say "ok    all containers healthy"
 fi
 
+# 4. Every script the app shell names must actually resolve. `/` answering 200 is
+#    not enough: index.html is a template naming content-hashed chunks, so a stale
+#    bundle patch (ops/badge-patch.sh) or an update applied around it can leave the
+#    page pointing at chunks the image no longer has. The page still returns 200
+#    while the app never boots, and nothing else here would notice.
+scripts=$(curl -sS --max-time 20 "$base/" 2>/dev/null \
+	| grep -o 'src="/[^"]*\.js"' | sed 's/^src="//; s/"$//' | sort -u)
+if [ -z "$scripts" ]; then
+	note_fail "no script tags in $base/ - the app shell did not render"
+else
+	missing=''
+	for s in $scripts; do
+		code=$(curl -sS -I -o /dev/null -w '%{http_code}' --max-time 20 "$base$s" 2>/dev/null || echo 000)
+		if [ "$code" != "200" ]; then
+			missing="$missing $s($code)"
+		fi
+	done
+	if [ -n "$missing" ]; then
+		note_fail "app shell names scripts that do not resolve:$missing"
+	else
+		say "ok    $(printf '%s\n' "$scripts" | grep -c .) app scripts all resolve"
+	fi
+fi
+
 say ""
 if [ "$fails" -eq 0 ]; then
 	say "PASS  instance healthy"
