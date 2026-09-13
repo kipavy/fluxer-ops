@@ -1,0 +1,43 @@
+# Where fluxer-ops alerts go. Read by notify.sh (and so by watchdog.sh and
+# backup.sh). To use it:
+#
+#   cp notify.conf.example notify.conf && chmod 600 notify.conf
+#   fluxer notify test
+#
+# notify.conf holds tokens and webhook URLs, which are credentials: it is never
+# committed. It is sourced by sh, so KEY=value with no spaces around '=', and
+# single-quote anything containing spaces or shell characters. An environment
+# variable of the same name overrides the value here.
+#
+# Every configured channel gets every message. Configure at least two if you can:
+# the point is to hear about an outage, and one channel is one thing to break.
+
+# --- ntfy: push notifications to a phone (https://ntfy.sh, or self-hosted) ---
+# On ntfy.sh the topic name IS the password: anyone who knows it can read and
+# post. Use a long random one, e.g. `openssl rand -hex 12`.
+#NOTIFY_NTFY_URL=https://ntfy.sh/fluxer-alerts-CHANGE-ME
+# Only for protected topics (access token, sent as a Bearer token).
+#NOTIFY_NTFY_TOKEN=tk_CHANGE_ME
+
+# --- webhook: a Fluxer, Discord or Slack incoming webhook URL ---
+# Posts {"content": ..., "text": ...}. Fluxer and Discord read "content", Slack
+# reads "text". A Fluxer webhook on this same instance goes down with it, so pair
+# it with something outside.
+#NOTIFY_WEBHOOK_URL=https://discord.com/api/webhooks/CHANGE/ME
+
+# --- email: through the SMTP server already set in ../.env (FLUXER_EMAIL_SMTP_*) ---
+# Comma-separated recipients.
+#NOTIFY_EMAIL_TO=you@example.com
+# Only if .env's mail settings are empty or not what you want for alerts.
+# Port 465 = TLS from the start; any other port uses STARTTLS, required when
+# NOTIFY_SMTP_SECURE=true.
+#NOTIFY_SMTP_HOST=smtp.example.com
+#NOTIFY_SMTP_PORT=587
+#NOTIFY_SMTP_USERNAME=alerts@example.com
+#NOTIFY_SMTP_PASSWORD='CHANGE ME'
+#NOTIFY_SMTP_SECURE=true
+#NOTIFY_EMAIL_FROM=alerts@example.com
+
+# --- behaviour ---
+# While something stays broken, repeat the alert this often. 0 = never.
+#NOTIFY_REMIND_HOURS=24

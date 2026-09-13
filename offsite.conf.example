@@ -1,0 +1,33 @@
+# shellcheck shell=sh disable=SC2034 # sourced by offsite.sh, which uses these
+# offsite.conf - settings for offsite.sh. Copy to offsite.conf, then:
+#   chmod 600 offsite.conf
+# offsite.conf holds live credentials and is gitignored. Never commit it.
+#
+# Sourced by sh, so plain NAME=value lines; quote values with spaces or $.
+
+# ---------------------------------------------------------------------------
+# WARNING: RESTIC_PASSWORD is the encryption key for every snapshot.
+# Lose it and the repository is unrecoverable -- by anyone, including you.
+# Store a copy somewhere that is NOT this host (a password manager). A copy that
+# only lives here is lost exactly when you need it: when the host is gone.
+# ---------------------------------------------------------------------------
+RESTIC_PASSWORD=
+# Or keep it in a file instead (absolute host path, chmod 600):
+#RESTIC_PASSWORD_FILE=/home/ubuntu/.config/fluxer-restic-password
+
+# Cloudflare R2. ACCOUNT_ID is in the R2 dashboard; the bucket must exist.
+RESTIC_REPOSITORY='s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/BUCKET'
+# An R2 API token with "Object Read & Write", scoped to that one bucket.
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
+# R2 has no regions; this is what it expects S3 clients to send.
+AWS_DEFAULT_REGION=auto
+
+# Optional. Defaults shown.
+#OFFSITE_KEEP_DAILY=14
+#OFFSITE_KEEP_WEEKLY=8
+#OFFSITE_KEEP_MONTHLY=12
+#OFFSITE_MAX_AGE_HOURS=36                  # `status` exits 1 past this
+#OFFSITE_HOST=                             # snapshot host; defaults to `hostname`
+#OFFSITE_UPLOADS_VOLUME=fluxer_seaweedfs-data
+#OFFSITE_CACHE_VOLUME=fluxer-restic-cache  # restic's local index cache
