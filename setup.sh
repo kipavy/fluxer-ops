@@ -308,6 +308,69 @@ phase_ports() {
 	ask "Are they open?" y || die 2 "Open them, then run this again."
 }
 
+fetch_installer() {
+	_url=${INSTALLER_URL:-https://fluxer.dev/install.sh}
+	curl -fsSL "$_url" -o "$TMP/install.sh" && curl -fsSL "$_url.sha256" -o "$TMP/install.sh.sha256" \
+		|| die 4 "Could not download $_url."
+	# The same check update.sh does. This script writes every secret the instance has.
+	(cd "$TMP" && sha256sum -c install.sh.sha256 > /dev/null 2>&1) \
+		|| die 4 "The Fluxer installer's checksum did not verify. It was not run."
+}
+
+installer_meaning() {
+	case "$1" in
+		1) echo "it rejected its arguments (a setup.sh bug: please report it)" ;;
+		2) echo "a prerequisite is missing (its message is above)" ;;
+		3) echo "it refused to overwrite an existing instance (message above)" ;;
+		4) echo "a download failed" ;;
+		5) echo "generating the instance's secrets failed" ;;
+		6) echo "the stack did not come up. Most often: DNS does not point here yet, or ports 80/443 are closed at the provider" ;;
+		130) echo "it was interrupted" ;;
+		*) echo "exit code $1" ;;
+	esac
+}
+
+phase_install() {
+	fetch_installer
+	mkdir -p "$FLUXER_DIR"
+	cp "$TMP/install.sh" "$FLUXER_DIR/install.sh"
+	st_do "installing Fluxer into $FLUXER_DIR (about 3.5 GB of images: a few minutes)"
+	_rc=0
+	# shellcheck disable=SC2086 # ALLOW_ROOT is empty or one flag
+	sh "$FLUXER_DIR/install.sh" --dir "$FLUXER_DIR" --domain "$DOMAIN" --email "$EMAIL" --non-interactive $ALLOW_ROOT || _rc=$?
+	[ "$_rc" -eq 0 ] || die "$_rc" "The Fluxer installer stopped: $(installer_meaning "$_rc"). Fix that and run setup again."
+	NEW_INSTANCE=1
+	st_ok "Fluxer is installed"
+}
+
+phase_instance() {
+	if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/docker-compose.yml" ] && [ -f "$FLUXER_DIR/.env" ]; then
+		DOMAIN=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
+		st_ok "Fluxer found at $FLUXER_DIR (https://$DOMAIN)"
+		return 0
+	fi
+	if [ "$CHECK_ONLY" -eq 1 ]; then
+		st_bad "no Fluxer instance${FLUXER_DIR:+ at $FLUXER_DIR}"
+		MISSING=1
+		return 0
+	fi
+	if [ -z "$FLUXER_DIR" ]; then
+		# A clone at <dir>/ops is the layout get.sh makes: install next to it.
+		if [ "$(basename "$OPS")" = ops ]; then
+			FLUXER_DIR=$(dirname "$OPS")
+		else
+			FLUXER_DIR=$(readlink -m "$(prompt "Install Fluxer into" "$HOME/fluxer")")
+		fi
+	fi
+	export FLUXER_DIR
+	say "  No Fluxer instance yet: installing one into $FLUXER_DIR."
+	ask_domain_email
+	phase_dns
+	phase_ports
+	phase_install
+	BACKUP_ROOT=${BACKUP_ROOT:-$(dirname "$FLUXER_DIR")/fluxer-backups}
+}
+
 # --- phase 3: core wiring -----------------------------------------------------
 
 cron_list() {
@@ -422,16 +485,15 @@ phase_docker "$ORIG_ARGS"
 phase_tools
 say ""
 
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
 say "Fluxer"
-if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.env" ]; then
-	st_ok "found at $FLUXER_DIR (https://$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1))"
-else
-	die 2 "No Fluxer instance found. (Installing one arrives in a later task.)"
-fi
+phase_instance
 
 say ""
 say "Wiring"
-core_wiring
+if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.env" ]; then core_wiring; fi
 
 [ "$CHECK_ONLY" -eq 1 ] && exit "$MISSING"
 exit 0

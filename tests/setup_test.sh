@@ -268,4 +268,32 @@ EOF
   rc=0; ( ASSUME_YES=1; phase_dns > /dev/null 2>&1 ) || rc=$?; assert_eq "--yes with a wrong record exits 2" 2 "$rc"
   finish )
 
+# --- the upstream installer
+( load
+  mkdir -p "$tmp/up" "$tmp/new"
+  cat > "$tmp/up/install.sh" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" > "$tmp/up/args"
+exit \${STUB_RC:-0}
+EOF
+  (cd "$tmp/up" && sha256sum install.sh > install.sh.sha256)
+  INSTALLER_URL="file://$tmp/up/install.sh" TMP="$tmp/t2"; mkdir -p "$TMP"
+  FLUXER_DIR="$tmp/new" DOMAIN=chat.example.test EMAIL=me@example.test ALLOW_ROOT=''
+
+  phase_install > /dev/null
+  assert_eq "installer gets dir, domain, email, non-interactive" \
+	"--dir $tmp/new --domain chat.example.test --email me@example.test --non-interactive" "$(cat "$tmp/up/args")"
+  assert_eq "installer kept in the instance dir" "$(cat "$tmp/up/install.sh")" "$(cat "$tmp/new/install.sh")"
+  assert_eq "marks a new instance" 1 "$NEW_INSTANCE"
+
+  rc=0; ( export STUB_RC=6; phase_install > "$tmp/o6" 2>&1 ) || rc=$?
+  assert_eq "installer failure keeps its code" 6 "$rc"
+  assert_contains "exit 6 explained" "DNS" "$(cat "$tmp/o6")"
+
+  printf 'echo tampered\n' >> "$tmp/up/install.sh"
+  rc=0; ( phase_install > "$tmp/o4" 2>&1 ) || rc=$?
+  assert_eq "bad checksum exits 4" 4 "$rc"
+  assert_contains "bad checksum refuses to run" "did not verify" "$(cat "$tmp/o4")"
+  finish )
+
 finish
