@@ -1,4 +1,7 @@
 #!/bin/sh
+# shellcheck disable=SC2034 # file-wide: variables set here (ASSUME_YES, CHECK_ONLY,
+# DOMAIN, SYSTEMCTL, ALLOW_ROOT, and their kind) are inputs to the setup.sh functions
+# this file sources with `load`, not used directly here - shellcheck can't see that.
 # setup_test.sh - setup.sh's helpers and phases, against stubs in a scratch directory.
 # No real crontab, sudo, docker or network is touched.
 set -eu
