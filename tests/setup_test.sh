@@ -95,4 +95,44 @@ load() {
   [ -e "$tmp/cron/root" ] && fail "no sudo wrote root's crontab" || pass "no sudo leaves root's crontab alone"
   finish )
 
+# --- prerequisites
+( load
+  version_ge 2.26.1 2.24.4 && pass "2.26.1 >= 2.24.4" || fail "2.26.1 >= 2.24.4"
+  version_ge 2.24.4 2.24.4 && pass "equal versions are enough" || fail "equal versions are enough"
+  version_ge 2.9.0 2.24.4 && fail "2.9.0 is older than 2.24.4" || pass "2.9.0 is older than 2.24.4"
+  version_ge 10.0.0 2.24.4 && pass "numeric, not lexical" || fail "numeric, not lexical"
+
+  mkdir -p "$tmp/pm"; printf '#!/bin/sh\n' > "$tmp/pm/apt-get"; chmod +x "$tmp/pm/apt-get"
+  assert_eq "pkg_hint on apt" "sudo apt-get install -y git" "$(PATH="$tmp/pm:/usr/bin:/bin" pkg_hint git)"
+
+  # docker compose too old, tools present
+  mkdir -p "$tmp/d"
+  cat > "$tmp/d/docker" <<'EOF'
+#!/bin/sh
+case "$*" in
+	"compose version --short") echo "${COMPOSE_V:-2.26.1}" ;;
+	info) exit 0 ;;
+	version*) echo 27.0.0 ;;
+esac
+EOF
+  chmod +x "$tmp/d/docker"
+  DOCKER="$tmp/d/docker" CHECK_ONLY=1 MISSING=0
+  export COMPOSE_V=2.20.0  # read by the docker stub, a child process
+  out=$(phase_tools); assert_contains "old compose is reported" "older than 2.24.4" "$out"
+  phase_tools > /dev/null; assert_eq "old compose counts as missing" 1 "$MISSING"
+  unset COMPOSE_V
+  MISSING=0; out=$(phase_tools); assert_contains "compose ok" "✓ Docker Compose 2.26.1" "$out"
+
+  # no docker at all, check mode: reported, not installed
+  DOCKER="$tmp/nope/docker" MISSING=0
+  out=$(phase_docker ''); assert_contains "missing docker reported" "Docker is not installed" "$out"
+  phase_docker '' > /dev/null; assert_eq "missing docker counts" 1 "$MISSING"
+
+  # no docker, interactive, declined: exits 2 with the manual route
+  CHECK_ONLY=0 ASSUME_YES=0
+  rc=0; ( printf 'n\n' | phase_docker '' > "$tmp/o" 2>&1 ) || rc=$?
+  assert_eq "declined docker install exits 2" 2 "$rc"
+  assert_contains "points at the docs" "docs.docker.com" "$(cat "$tmp/o")"
+  finish )
+
 finish

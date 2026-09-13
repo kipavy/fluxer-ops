@@ -84,6 +84,113 @@ quote_cmd() {
 	done
 }
 
+# --- phase 1: prerequisites ---------------------------------------------------
+
+pkg_hint() { # <package>: the command that installs it here
+	if command -v apt-get > /dev/null 2>&1; then echo "sudo apt-get install -y $1"
+	elif command -v dnf > /dev/null 2>&1; then echo "sudo dnf install -y $1"
+	elif command -v zypper > /dev/null 2>&1; then echo "sudo zypper install -y $1"
+	elif command -v pacman > /dev/null 2>&1; then echo "sudo pacman -S --needed $1"
+	elif command -v apk > /dev/null 2>&1; then echo "sudo apk add $1"
+	else echo "install $1 with this distribution's package manager"; fi
+}
+
+version_ge() { # <have> <want>: dotted numbers, compared numerically
+	[ "$(printf '%s\n%s\n' "$2" "$1" | sort -t. -k1,1n -k2,2n -k3,3n | head -n 1)" = "$2" ]
+}
+
+phase_root() {
+	[ "$(id -u)" -eq 0 ] || return 0
+	st_bad "running as root"
+	say "    The Fluxer installer refuses root unless told otherwise: an ordinary user in the"
+	say "    docker group keeps a mistake in a container from being a mistake on the host."
+	[ "$CHECK_ONLY" -eq 1 ] && return 0
+	if [ "$ASSUME_YES" -eq 1 ] || ask "Continue as root anyway?" n; then
+		ALLOW_ROOT=--allow-root
+	else
+		die 2 "Run it again as a normal user who can sudo."
+	fi
+}
+
+phase_sudo() {
+	if [ "$(id -u)" -eq 0 ]; then SUDO_OK=1; return 0; fi
+	if [ "$CHECK_ONLY" -eq 1 ]; then
+		if $SUDO -n true 2> /dev/null; then SUDO_OK=1; st_ok "sudo"; else st_skip "sudo not checked (would ask for a password)"; fi
+		return 0
+	fi
+	if $SUDO -v 2> /dev/null; then
+		SUDO_OK=1
+		st_ok "sudo"
+	else
+		st_skip "no sudo: the watchdog cron and the firewalld fix will be skipped"
+	fi
+}
+
+# phase_docker <original args, quoted>: needs them to re-run itself under the new group.
+phase_docker() {
+	if ! command -v "$DOCKER" > /dev/null 2>&1; then
+		st_bad "Docker is not installed"
+		if [ "$CHECK_ONLY" -eq 1 ]; then MISSING=1; return 0; fi
+		_url=${DOCKER_INSTALL_URL:-https://get.docker.com}
+		say "    Docker's official install script can set it up: $_url"
+		if ! ask "Install Docker now?" y; then
+			die 2 "Install Docker Engine with the compose plugin (https://docs.docker.com/engine/install/), then run this again."
+		fi
+		[ "$SUDO_OK" -eq 1 ] || die 2 "Installing Docker needs root or sudo."
+		st_do "installing Docker"
+		_tmp=$(mktemp)
+		curl -fsSL "$_url" -o "$_tmp" || die 4 "Could not download $_url."
+		as_root sh "$_tmp" || die 2 "Docker's install script failed (output above)."
+		rm -f "$_tmp"
+		st_ok "Docker installed"
+	fi
+
+	if [ "$(id -u)" -eq 0 ] || $DOCKER info > /dev/null 2>&1; then
+		st_ok "Docker $($DOCKER version --format '{{.Server.Version}}' 2> /dev/null || echo)"
+		return 0
+	fi
+	_me=$(id -un)
+	if getent group docker 2> /dev/null | cut -d: -f4 | tr ',' '\n' | grep -qx "$_me"; then
+		# In the group, but this login predates it: sg gives it to this run.
+		[ "${SETUP_SG:-0}" = 1 ] && die 2 "Docker is not answering. Is it running? sudo systemctl start docker"
+		[ "$CHECK_ONLY" -eq 1 ] && { st_bad "$_me is in the docker group, but this login is not yet (log in again)"; MISSING=1; return 0; }
+	else
+		st_bad "$_me cannot use Docker (not in the docker group)"
+		if [ "$CHECK_ONLY" -eq 1 ]; then MISSING=1; return 0; fi
+		ask "Add $_me to the docker group?" y || die 2 "Add yourself with: sudo usermod -aG docker $_me, log in again, and run this again."
+		[ "$SUDO_OK" -eq 1 ] || die 2 "That needs sudo: sudo usermod -aG docker $_me"
+		as_root usermod -aG docker "$_me"
+		st_ok "$_me added to the docker group"
+	fi
+	st_do "continuing with the docker group (no need to log in again)"
+	SETUP_SG=1 exec sg docker -c "SETUP_SG=1 sh $(quote_cmd "$SELF") $1"
+}
+
+phase_tools() {
+	_missing=''
+	for _t in curl python3 sha256sum git; do
+		command -v "$_t" > /dev/null 2>&1 || _missing="$_missing $_t"
+	done
+	_cv=$($DOCKER compose version --short 2> /dev/null | sed 's/^v//') || _cv=''
+	if [ -z "$_cv" ]; then
+		st_bad "Docker Compose plugin missing"
+		_missing="$_missing docker-compose-plugin"
+	elif ! version_ge "$_cv" 2.24.4; then
+		st_bad "Docker Compose $_cv is older than 2.24.4"
+		_missing="$_missing docker-compose-plugin"
+	else
+		st_ok "Docker Compose $_cv"
+	fi
+	if [ -z "$_missing" ]; then st_ok "curl, python3, sha256sum, git"; return 0; fi
+	for _m in $_missing; do
+		case "$_m" in sha256sum) _p=coreutils ;; *) _p=$_m ;; esac
+		[ "$_m" = docker-compose-plugin ] && continue
+		st_bad "$_m missing: $(pkg_hint "$_p")"
+	done
+	if [ "$CHECK_ONLY" -eq 1 ]; then MISSING=1; return 0; fi
+	die 2 "Install what is missing above, then run this again."
+}
+
 # --- phase 3: core wiring -----------------------------------------------------
 
 cron_list() {
@@ -170,6 +277,8 @@ usage() {
 	exit 1
 }
 
+ORIG_ARGS=$(quote_cmd "$@")
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) CHECK_ONLY=1 ;;
@@ -189,9 +298,12 @@ done
 # shellcheck source=lib.sh
 . "$SELF_DIR/lib.sh"
 
-if [ "$(id -u)" -eq 0 ] || { [ "$CHECK_ONLY" -eq 1 ] && $SUDO -n true 2> /dev/null; } || { [ "$CHECK_ONLY" -eq 0 ] && $SUDO -v 2> /dev/null; }; then
-	SUDO_OK=1
-fi
+say "Prerequisites"
+phase_root
+phase_sudo
+phase_docker "$ORIG_ARGS"
+phase_tools
+say ""
 
 say "Fluxer"
 if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.env" ]; then
