@@ -1,0 +1,7 @@
+# Never commit secrets or backup artifacts, even if someone copies them here.
+.env
+.env.*
+*.log
+*.dump
+*.tgz
+backups/
