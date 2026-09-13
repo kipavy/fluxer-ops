@@ -13,27 +13,59 @@ usage() {
 	cat <<'USAGE'
 fluxer - operate the self-hosted Fluxer instance
 
-  fluxer status              What is running, disk, last backup, health at a glance
-  fluxer check               Full health check: endpoints, WebSocket, containers
-  fluxer logs [svc] [-f]     Tail logs, all services or one
-  fluxer up                  Start the stack
-  fluxer down                Stop the stack (does NOT delete data)
-  fluxer restart [svc]       Restart everything, or one service
+Health
+  fluxer status [--json]     What is running, disk, last backup, health at a glance
+  fluxer check               Is it serving now: endpoints, WebSocket, containers
+  fluxer doctor [--quiet]    Will it still be fine next week: cron, backups, certs, drift
+  fluxer errors [--since 1h] [svc]
+                             Error lines from every service, grouped and counted
+  fluxer top                 Memory and CPU per service, against its limit
+  fluxer voice               Can clients reach LiveKit directly (7881/tcp, 7882/udp)
 
+Stack
+  fluxer logs [svc] [-f]     Tail logs, all services or one
+  fluxer up | down | ps      Start, stop (does NOT delete data), list
+  fluxer restart [svc]       Restart everything, or one service
+  fluxer psql | valkey [args]
+                             Database or cache shell, credentials filled in
+  fluxer sh <svc>            Shell inside a service
+
+Updates
+  fluxer changelog [--all]   What an update would bring, per component
   fluxer update [--check]    Update safely: preflight, plan, apply, verify
   fluxer rollback            Go back to the previous release
+  fluxer prune [--apply]     Free image space without breaking rollback
 
+Accounts
+  fluxer users list [--recent N] | show <user> | stats [--messages]
+  fluxer users staff <user> [--off] | verify-email <user>
   fluxer premium <user>      Grant Plutonium + the Visionary badge, patch included
              [--subscriber]  "subscriber since" badge instead of Visionary
              [--off]         Revoke it
              [--list]        Who has premium
+  fluxer gifts ...           Plutonium gift codes (fluxer gifts --help)
   fluxer badge-patch         Re-apply just the client-side badge patch
              [--revert]      Drop it and go back to the stock bundle
 
-  fluxer backup              Take a backup now
+Backups
+  fluxer backup              Take a backup now (and push it off-site, if configured)
   fluxer backups             List what backups exist
   fluxer verify-backup       Prove the newest dump restores, into a scratch database
   fluxer restore <dir>       Restore from a backup (destructive, asks first)
+  fluxer offsite status | init | push | snapshots | check | restore <snap> <dir>
+                             Encrypted off-site copies on R2 (fluxer offsite --help)
+
+Host
+  fluxer notify test | status
+                             Alert channels: ntfy, webhook, email
+  fluxer disk [--json]       Where the disk goes, growth per day, days until full
+  fluxer env keys | get KEY | set KEY VALUE | diff
+                             .env without an editor; secrets masked
+  fluxer cf-ips [--apply]    Keep trusted proxies in step with Cloudflare's ranges
+  fluxer firewall-fix [--apply | --revert]
+                             Stop firewalld restarts from wiping Docker's chains
+  fluxer install-host [--check]
+                             Symlink, shell completion, cron jobs on this host
 
   fluxer help                This text
 
@@ -57,34 +89,65 @@ newest_backup() {
 }
 
 cmd_status() {
-	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
-	printf 'instance   https://%s\n' "$domain"
+	json=0
+	case "${1:-}" in
+		--json) json=1 ;;
+		'') ;;
+		*) die "usage: fluxer status [--json]" ;;
+	esac
 
+	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
 	ver=$(curl -sS -I --max-time 15 "https://$domain/api/_health" 2>/dev/null \
 		| sed -n 's/^[Xx]-[Ff]luxer-[Vv]ersion: *//p' | tr -d '\r') || ver=''
-	printf 'version    %s\n' "${ver:-unknown}"
-
-	expected=$(compose config --services 2>/dev/null | grep -vc '^seaweedfs-init$' || echo '?')
+	expected=$(compose config --services 2>/dev/null | grep -vc '^seaweedfs-init$' || echo 0)
 	running=$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
-	printf 'services   %s/%s running\n' "${running:-0}" "$expected"
-
 	unhealthy=$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null \
 		| grep -v '^seaweedfs-init ' | grep -Ev ' Up .*healthy| Up [0-9]' || true)
+	chain=0
+	iptables_ok && chain=1
+	disk_free=$(df -Pk "$FLUXER_DIR" | awk 'NR==2{print $4 * 1024}')
+	disk_total=$(df -Pk "$FLUXER_DIR" | awk 'NR==2{print $2 * 1024}')
+	b=$(newest_backup || true)
+
+	if [ "$json" -eq 1 ]; then
+		# Everything goes through argv into json.dumps: no hand-built JSON, so no
+		# quoting bug the day a status string contains a quote.
+		python3 - "$domain" "${ver:-}" "${running:-0}" "$expected" "$unhealthy" "$chain" \
+			"$disk_free" "$disk_total" "${b:-}" <<'PY'
+import json, os, sys, time
+domain, ver, running, expected, unhealthy, chain, free, total, backup = sys.argv[1:]
+out = {
+    "instance": f"https://{domain}",
+    "version": ver or None,
+    "services": {"running": int(running), "expected": int(expected),
+                 "unhealthy": [l for l in unhealthy.splitlines() if l]},
+    "iptables_docker_chain": chain == "1",
+    "disk": {"free_bytes": int(free), "total_bytes": int(total)},
+    "last_backup": None,
+}
+if backup:
+    size = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(backup) for f in fs)
+    out["last_backup"] = {"name": os.path.basename(backup), "bytes": size,
+                          "age_seconds": int(time.time() - os.path.getmtime(backup))}
+print(json.dumps(out, indent=2))
+PY
+		return
+	fi
+
+	printf 'instance   https://%s\n' "$domain"
+	printf 'version    %s\n' "${ver:-unknown}"
+	printf 'services   %s/%s running\n' "${running:-0}" "$expected"
 	if [ -n "$unhealthy" ]; then
 		printf 'PROBLEM    %s\n' "$(printf '%s' "$unhealthy" | tr '\n' ';')"
 	fi
-
-	if iptables_ok; then
+	if [ "$chain" -eq 1 ]; then
 		printf 'iptables   DOCKER chain present\n'
 	else
 		printf 'iptables   DOCKER CHAIN MISSING - run: sudo systemctl restart docker\n'
 	fi
-
 	printf 'disk       %s free of %s\n' \
 		"$(df -h "$FLUXER_DIR" | awk 'NR==2{print $4}')" \
 		"$(df -h "$FLUXER_DIR" | awk 'NR==2{print $2}')"
-
-	b=$(newest_backup || true)
 	if [ -n "${b:-}" ]; then
 		printf 'last backup %s (%s, %s old)\n' "$(basename "$b")" \
 			"$(du -sh "$b" 2>/dev/null | cut -f1)" \
@@ -238,16 +301,29 @@ cmd=${1:-help}
 [ $# -gt 0 ] && shift || true
 
 case "$cmd" in
-	status) cmd_status ;;
+	status) cmd_status "$@" ;;
 	check) exec "$OPS/check.sh" "$@" ;;
+	doctor) exec "$OPS/doctor.sh" "$@" ;;
+	errors | top | voice | psql | valkey | sh) exec "$OPS/debug.sh" "$cmd" "$@" ;;
 	update) exec "$OPS/update.sh" "$@" ;;
+	changelog) exec "$OPS/changelog.sh" "$@" ;;
+	prune) exec "$OPS/prune.sh" "$@" ;;
+	users) exec "$OPS/users.sh" "$@" ;;
 	premium) exec "$OPS/premium.sh" "$@" ;;
+	gifts | gift) exec "$OPS/gifts.sh" "$@" ;;
 	badge-patch) exec "$OPS/badge-patch.sh" "$@" ;;
 	backup) exec "$OPS/backup.sh" "$@" ;;
 	backups) cmd_backups ;;
 	verify-backup | verify) cmd_verify_backup ;;
 	restore) cmd_restore "$@" ;;
+	offsite) exec "$OPS/offsite.sh" "$@" ;;
 	rollback) cmd_rollback ;;
+	notify) exec "$OPS/notify.sh" "$@" ;;
+	disk) exec "$OPS/disk.sh" "$@" ;;
+	env) exec "$OPS/env.sh" "$@" ;;
+	cf-ips) exec "$OPS/cf-ips.sh" "$@" ;;
+	firewall-fix) exec "$OPS/firewall-fix.sh" "$@" ;;
+	install-host) exec "$OPS/install-host.sh" "$@" ;;
 	logs) compose logs "$@" ;;
 	up) compose up -d "$@" ;;
 	down) compose down "$@" ;;
