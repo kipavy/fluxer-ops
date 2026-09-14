@@ -59,7 +59,8 @@
 # user and db "fluxer"); unset, it is the deployment's postgres service.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 PG_CONTAINER=${PG_CONTAINER:-}
 OVERRIDE="$FLUXER_DIR/docker-compose.override.yml"
 

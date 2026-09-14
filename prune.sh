@@ -21,7 +21,8 @@
 #   ./prune.sh --keep N     keep the images of the newest N records (default 2)
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 RECORD_DIR=${RECORD_DIR:-$FLUXER_DIR/backups}
 KEEP=2
 APPLY=0

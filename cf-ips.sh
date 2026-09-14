@@ -23,7 +23,8 @@
 # Only the FLUXER_EDGE_TRUSTED_PROXIES line of .env is ever read or printed.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 ENV_FILE="$FLUXER_DIR/.env"
 KEY=FLUXER_EDGE_TRUSTED_PROXIES
 CF_URL=${CF_URL:-https://www.cloudflare.com}

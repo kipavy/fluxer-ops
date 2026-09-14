@@ -5,9 +5,7 @@
 # are tested independently and are also what cron calls directly.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-BACKUP_ROOT=${BACKUP_ROOT:-/home/ubuntu/Documents/fluxer-backups}
-OPS="$FLUXER_DIR/ops"
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
 
 usage() {
 	cat <<'USAGE'
@@ -64,17 +62,15 @@ Host
   fluxer cf-ips [--apply]    Keep trusted proxies in step with Cloudflare's ranges
   fluxer firewall-fix [--apply | --revert]
                              Stop firewalld restarts from wiping Docker's chains
-  fluxer install-host [--check]
-                             Symlink, shell completion, cron jobs on this host
+  fluxer setup [--check]     Install or re-check: prerequisites, instance, cron, extras
 
   fluxer help                This text
-
-Deployment: /home/ubuntu/Documents/fluxer   Backups: /home/ubuntu/Documents/fluxer-backups
 USAGE
+	printf '\nDeployment: %s   Backups: %s\n' "${FLUXER_DIR:-(none found)}" "${BACKUP_ROOT:-(none)}"
 }
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
-compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
+compose() { need_instance; (cd "$FLUXER_DIR" && docker compose "$@"); }
 
 # Backups live in two places: ours in BACKUP_ROOT, and the installer's own
 # pre-upgrade records in <deployment>/backups.
@@ -89,6 +85,7 @@ newest_backup() {
 }
 
 cmd_status() {
+	need_instance
 	json=0
 	case "${1:-}" in
 		--json) json=1 ;;
@@ -167,6 +164,7 @@ iptables_ok() {
 }
 
 cmd_backups() {
+	need_instance
 	printf '%-34s %8s  %-18s %s\n' 'BACKUP' 'SIZE' 'CONTENTS' 'WHERE'
 	all_backup_dirs | while read -r d; do
 		what=''
@@ -185,6 +183,7 @@ cmd_backups() {
 # Restore the newest dump into a scratch database to prove it actually works.
 # Never touches the live database.
 cmd_verify_backup() {
+	need_instance
 	b=$(newest_backup || true)
 	[ -n "${b:-}" ] || die "no backup with a fluxer.dump found in $BACKUP_ROOT"
 	echo "Verifying $(basename "$b")"
@@ -221,6 +220,7 @@ cmd_verify_backup() {
 }
 
 cmd_restore() {
+	need_instance
 	src=${1:-}
 	if [ -z "$src" ]; then
 		echo "Pick a backup:"; echo
@@ -273,6 +273,7 @@ WARN
 # older image does not have, which leaves the page loading nothing at all. Same
 # reasoning as update.sh, which does this around an update.
 cmd_rollback() {
+	need_instance
 	patched=0
 	if [ -f "$FLUXER_DIR/docker-compose.override.yml" ] \
 		&& grep -q 'badge-patch.sh' "$FLUXER_DIR/docker-compose.override.yml"; then
@@ -324,6 +325,7 @@ case "$cmd" in
 	cf-ips) exec "$OPS/cf-ips.sh" "$@" ;;
 	firewall-fix) exec "$OPS/firewall-fix.sh" "$@" ;;
 	install-host) exec "$OPS/install-host.sh" "$@" ;;
+	setup) exec "$OPS/setup.sh" "$@" ;;
 	logs) compose logs "$@" ;;
 	up) compose up -d "$@" ;;
 	down) compose down "$@" ;;

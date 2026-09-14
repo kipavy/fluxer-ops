@@ -13,7 +13,7 @@
 # ---------------------------------------------------------------------------
 RESTIC_PASSWORD=
 # Or keep it in a file instead (absolute host path, chmod 600):
-#RESTIC_PASSWORD_FILE=/home/ubuntu/.config/fluxer-restic-password
+#RESTIC_PASSWORD_FILE=$HOME/.config/fluxer-restic-password
 
 # Cloudflare R2. ACCOUNT_ID is in the R2 dashboard; the bucket must exist.
 RESTIC_REPOSITORY='s3:https://ACCOUNT_ID.r2.cloudflarestorage.com/BUCKET'

@@ -14,3 +14,6 @@ patches/
 # restic password. Copy the *.example next to each.
 notify.conf
 offsite.conf
+
+# Subagent-driven development scratch: ledger, briefs, review packages.
+.superpowers/

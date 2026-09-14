@@ -8,7 +8,8 @@
 #   ./update.sh --yes     apply without asking
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+need_instance
 ASSUME_YES=0
 CHECK_ONLY=0
 for a in "$@"; do

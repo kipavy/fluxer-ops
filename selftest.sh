@@ -23,7 +23,9 @@ ok() { printf 'ok    %s\n' "$*"; }
 fail() { fails=$((fails + 1)); printf 'FAIL  %s\n' "$*"; }
 
 cd "$OPS"
-scripts=$(ls ./*.sh fluxer | sed 's|^\./||')
+# lib.sh is sourced, not run: it must parse, but it is not a command.
+scripts=$(ls ./*.sh fluxer | sed 's|^\./||' | grep -vx 'lib.sh')
+sh -n lib.sh 2>/dev/null || fail "lib.sh does not parse"
 
 # 1. Every script parses and is executable.
 for f in $scripts; do
@@ -49,7 +51,7 @@ undispatched=$(for c in $help_cmds; do printf '%s\n' "$case_cmds" | grep -qxF --
 	|| fail "in the help but not dispatched: $undispatched"
 # Aliases and the stack verbs shown on one shared line are fine to leave out.
 undocumented=$(for c in $case_cmds; do
-	case "$c" in help | --help | -h | verify | gift | down | ps | valkey) continue ;; esac
+	case "$c" in help | --help | -h | verify | gift | down | ps | valkey | install-host) continue ;; esac
 	printf '%s\n' "$help_cmds" | grep -qxF -- "$c" || printf '%s ' "$c"
 done)
 [ -z "$undocumented" ] && ok "every dispatched command is in the help" \
@@ -73,9 +75,30 @@ done
 tracked=$(git -C "$OPS" ls-files 2>/dev/null | grep -E '(^|/)(\.env|notify\.conf|offsite\.conf)$|\.dump$|\.tgz$' || true)
 [ -z "$tracked" ] && ok "no secrets or backup artifacts tracked by git" || fail "tracked secrets: $tracked"
 
+# 7. Paths come from lib.sh, never from the file: a host laid out differently
+#    must not need edits. Excludes this file itself: it necessarily contains the
+#    string it greps for, right here.
+hard=$(grep -l '/home/ubuntu' ./*.sh fluxer completion.bash ./*.example 2>/dev/null \
+	| sed 's|^\./||' | grep -vx 'selftest.sh' || true)
+[ -z "$hard" ] && ok "no hardcoded /home/ubuntu paths" || fail "hardcoded /home/ubuntu in: $hard"
+nolib=$(for f in $(grep -l 'FLUXER_DIR' ./*.sh fluxer | sed 's|^\./||'); do
+	case "$f" in lib.sh | get.sh | selftest.sh) continue ;; esac
+	grep -q '/lib\.sh"' "$f" || printf '%s ' "$f"
+done)
+[ -z "$nolib" ] && ok "every script that needs the instance sources lib.sh" || fail "does not source lib.sh: $nolib"
+
+# 6. The tests. Scratch directories and stubs only: nothing here reaches the instance.
+for t in tests/*_test.sh; do
+	if out=$(sh "$t" 2>&1); then
+		ok "$t"
+	else
+		fail "$t:"; printf '%s\n' "$out" | grep -v '^ok ' | sed 's/^/      /'
+	fi
+done
+
 if [ "$LINT" -eq 1 ]; then
 	# shellcheck disable=SC2086 # $scripts is a list of plain file names
-	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts 2>&1); then
+	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts lib.sh tests/*.sh 2>&1); then
 		ok "shellcheck clean (warnings and above)"
 	else
 		fail "shellcheck:"; printf '%s\n' "$out" | sed 's/^/      /'

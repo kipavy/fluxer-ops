@@ -1,12 +1,68 @@
 # fluxer-ops
 
-Operational scripts for a self-hosted [Fluxer](https://github.com/fluxerapp/fluxer) instance.
+Run your own [Fluxer](https://github.com/fluxerapp/fluxer) chat server, and keep it
+running: nightly backups, a watchdog, alerts, safe updates, and one `fluxer` command
+for the rest.
 
-Upstream ships `install.sh`, which handles **updates and rollback only**, and takes a
-backup **only during an upgrade**. There is no upstream CLI for monitoring or for
-scheduled backups. These scripts fill that gap.
+## Quick start
 
-Deployed at: `/home/ubuntu/Documents/fluxer` (scripts live in `ops/`).
+You need:
+
+- a Linux server with a public IP (any VPS: Oracle Cloud, Hetzner, AWS, DigitalOcean…)
+- a domain or subdomain you can add a DNS record to
+
+On the server, as a normal user who can `sudo`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/kipavy/fluxer-ops/main/get.sh | sh
+```
+
+It checks everything before it changes anything, and asks before each change:
+
+1. **Prerequisites**: installs Docker if it is missing, gives you access to it.
+2. **Your instance**: uses the Fluxer already on the server, or installs one: it checks
+   your domain points here, tells you which ports to open at your provider, then runs
+   Fluxer's official installer (checksum-verified: the `.sha256` comes from the same
+   place over the same TLS connection, so this catches a corrupted download, not a
+   swapped one - it is not a signature).
+3. **Wiring**: the `fluxer` command, nightly backups, the watchdog.
+4. **Optional**: alerts to your phone or chat, encrypted off-site backups, fixes for
+   firewalld and Cloudflare, each offered only when it applies.
+5. **Checks**, then prints your instance's URL and what to do next.
+
+Running it again is safe: whatever is already done shows ✓ and is left alone.
+`fluxer setup --check` reports without changing anything.
+
+Prefer to read before running anything? The same thing, without the pipe:
+
+```sh
+git clone https://github.com/kipavy/fluxer-ops ~/fluxer/ops
+~/fluxer/ops/setup.sh
+```
+
+Already running Fluxer somewhere else than `~/fluxer`? It is found through Docker, or
+point at it: `FLUXER_DIR=/path/to/fluxer` before either command. That is enough for
+`fluxer setup`, `check`, `backup` and the rest, but `fluxer badge-patch` (and
+`update`'s re-apply of it) and backups including `ops/` itself still expect this
+checkout at `<instance>/ops`; `setup.sh` says so if it is not.
+
+### If the first install does not come up
+
+| Symptom | Fix |
+| --- | --- |
+| "does not point at this server yet" | Add the `A` record setup shows at your DNS provider. It can take a few minutes; press Enter to re-check. |
+| Installer stops with "the stack did not come up" | Almost always ports 80/443 closed at the provider (security list / security group / cloud firewall), or DNS. Open them and run `fluxer setup` again. |
+| Behind Cloudflare and no certificate | Set the record to "DNS only" until the certificate is issued, then back to proxied with SSL mode "Full (strict)". |
+| "cannot use Docker" or `setup --check` says "this login is not yet" | Log out and back in once: the docker group applies to new logins. (On a first run `setup.sh` usually works around this itself via `sg`, without a fresh login.) |
+| Voice calls connect but no audio | Ports 7881/tcp and 7882/udp at the provider. `fluxer voice` checks them. |
+
+## This deployment
+
+Upstream ships `install.sh`, which handles **installs, updates and rollback**, and
+takes a backup **only during an upgrade**. There is no upstream CLI for monitoring or
+for scheduled backups. These scripts fill that gap. They started on an Oracle Cloud
+host with firewalld, which is where several of them (watchdog, firewall-fix) come
+from.
 
 ## The `fluxer` command
 
@@ -19,7 +75,7 @@ Stack     logs  up  down  ps  restart  psql  valkey  sh <svc>
 Updates   changelog  update  rollback  prune
 Accounts  users  premium  gifts  badge-patch
 Backups   backup  backups  verify-backup  restore  offsite
-Host      notify  disk  env  cf-ips  firewall-fix  install-host
+Host      notify  disk  env  cf-ips  firewall-fix  setup
 ```
 
 It is a **thin dispatcher**, not a rewrite: it delegates to the scripts below,
@@ -62,24 +118,22 @@ Three commands are worth knowing before you need them:
 | `disk.sh` | you; user cron `--record` daily | Filesystem, volumes, backups, images; keeps `../fluxer-backups/disk-history.tsv` for growth and days-until-full. |
 | `env.sh` | you | `keys`/`get`/`set`/`diff` on `.env`; secrets masked, backup before every change. |
 | `changelog.sh` | you, before updating | Per-component running version vs what `v1` points at now, and the commits in between. |
-| `install-host.sh` | you, once per host | The `fluxer` symlink, shell completion, and the three cron jobs. Idempotent. |
+| `setup.sh` | you, or `get.sh` | Prerequisites, the instance (installing it if needed), the `fluxer` symlink, completion, cron jobs, optional extras. Idempotent; `--check` only reports. |
+| `get.sh` | `curl \| sh` | Clones this repository next to the instance and runs `setup.sh`. |
+| `lib.sh` | every script | Finds the instance (`FLUXER_DIR`) and backups (`BACKUP_ROOT`); nothing is hardcoded. |
+| `install-host.sh` | old habits | Same as `setup.sh --no-extras`. |
 | `selftest.sh` | you, after editing these | Checks the tooling itself. Touches nothing. |
 
-## Install on a fresh host
+## Cron jobs
 
-```sh
-/home/ubuntu/Documents/fluxer/ops/install-host.sh
-```
+`fluxer setup` adds them, and never rewrites a line already there:
 
-It shows what is missing, asks, and adds only that: the `fluxer` symlink, bash
-completion, and the cron jobs -- `watchdog.sh` every 10 minutes in **root's**
-crontab (it needs iptables and systemctl), `backup.sh` at 03:00 and
-`disk.sh --record` at 03:30 in the user's. Existing crontab lines are never
-rewritten. `--check` only reports, and exits 1 if anything is missing, which is
-also what `fluxer doctor` looks at.
+- `watchdog.sh` every 10 minutes in **root's** crontab (it needs iptables and systemctl)
+- `backup.sh` at 03:00 and `disk.sh --record` at 03:30 in the user's
 
-Then, optionally but you want both: `notify.conf` (*Alerting*) and `offsite.conf`
-(*Off-site backups*).
+Each line carries `FLUXER_DIR=`, since cron starts with an empty environment.
+`fluxer setup --check` exits 1 if one is missing, which is also what `fluxer doctor`
+looks at.
 
 ## Why the watchdog exists
 
@@ -213,7 +267,7 @@ It **never updates itself**, so `update.sh` re-downloads and checksum-verifies i
 first. Roll back with:
 
 ```sh
-sh install.sh --rollback --dir /home/ubuntu/Documents/fluxer
+sh install.sh --rollback --dir /path/to/fluxer   # on this deployment, /home/ubuntu/Documents/fluxer
 ```
 
 Rollback needs the previous images still on disk, and on the moving `v1` tag those
@@ -476,7 +530,7 @@ another network, `nc -vz <ip> 7881` proves TCP.
 > been restored end to end, and `fluxer restore` itself has not been run in anger.
 
 ```sh
-cd /home/ubuntu/Documents/fluxer
+cd /path/to/fluxer   # on this deployment, /home/ubuntu/Documents/fluxer
 d=../fluxer-backups/auto-<timestamp>
 
 # database

@@ -21,13 +21,13 @@
 #   notify.sh test                      send a test message, report each channel
 #   notify.sh status                    channels configured, keys currently failing
 #
-# Config: $FLUXER_DIR/ops/notify.conf (see notify.conf.example), overridden by
+# Config: $OPS/notify.conf (see notify.conf.example), overridden by
 # environment variables of the same name. Email reuses the SMTP settings the
 # instance already has in $FLUXER_DIR/.env.
 set -eu
 
-FLUXER_DIR=${FLUXER_DIR:-/home/ubuntu/Documents/fluxer}
-NOTIFY_CONF=${NOTIFY_CONF:-$FLUXER_DIR/ops/notify.conf}
+. "$(dirname "$(readlink -f "$0")")/lib.sh"
+NOTIFY_CONF=${NOTIFY_CONF:-$OPS/notify.conf}
 ENV_FILE="$FLUXER_DIR/.env"
 
 # State lives with whoever runs us, so nobody fights over file ownership: the
