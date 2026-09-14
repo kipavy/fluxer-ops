@@ -71,8 +71,12 @@ pkg_hint() {
 	else echo "install $1 with this distribution's package manager"; fi
 }
 
-# The same rule as lib.sh, which is not here yet: FLUXER_DIR, a compose project
-# whose .env names a FLUXER_DOMAIN, then the two usual places.
+# Same ingredients as lib.sh's rule, but not the same order: FLUXER_DIR, then a
+# compose project whose .env names a FLUXER_DOMAIN, then the two well-known places.
+# lib.sh's middle step - the directory above ops/ - has no meaning here: this
+# function is deciding where ops/ will BE cloned, so there is no ops/ yet to look
+# above. get.sh is not here either, which is why the rule is duplicated rather
+# than sourced from lib.sh.
 find_instance() {
 	if [ -n "${FLUXER_DIR:-}" ]; then printf '%s' "$FLUXER_DIR"; return 0; fi
 	if command -v docker > /dev/null 2>&1; then

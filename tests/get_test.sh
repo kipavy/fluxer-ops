@@ -42,6 +42,55 @@ out=$(g env FLUXER_DIR="$tmp/busy" FLUXER_OPS_YES=1 2>&1) && rc=0 || rc=$?
 assert_eq "foreign ops/ dir: exits 3" 3 "$rc"
 [ -f "$tmp/busy/ops/mine" ] && pass "foreign ops/ untouched" || fail "foreign ops/ untouched"
 
+# The docker-detection path (find_instance's middle step, mirroring lib.sh's
+# fluxer_projects): a second stub docker that answers `compose ls --all --format
+# json` from a JSON fixture, so this pipeline actually runs instead of always
+# failing like the "exit 1" stub above. Still no real docker, no network.
+mkdir -p "$tmp/dstub"
+printf '#!/bin/sh\nif [ "$1" = compose ] && [ "$2" = ls ]; then cat "$DOCKER_LS_JSON"; else exit 1; fi\n' > "$tmp/dstub/docker"
+chmod +x "$tmp/dstub/docker"
+gd() { env -u FLUXER_DIR HOME="$home" PATH="$tmp/dstub:$PATH" FLUXER_OPS_REPO="$tmp/repo" GET_TEST_OUT="$tmp/called" DOCKER_LS_JSON="$tmp/ls.json" "$@" setsid -w sh "$SRC/get.sh" < /dev/null; }
+
+# One compose project with a FLUXER_DOMAIN in its .env: chosen.
+home="$tmp/home_a"; mkdir -p "$home"
+mkdir -p "$tmp/proj_a" && printf 'FLUXER_DOMAIN=proj-a.test\n' > "$tmp/proj_a/.env" && : > "$tmp/proj_a/docker-compose.yml"
+printf '[{"Name":"proja","Status":"running(1)","ConfigFiles":"%s/docker-compose.yml"}]\n' "$tmp/proj_a" > "$tmp/ls.json"
+gd env FLUXER_OPS_YES=1 > /dev/null 2>&1
+[ -f "$tmp/proj_a/ops/setup.sh" ] && pass "docker: sole domain project chosen" || fail "docker: sole domain project chosen"
+
+# One compose project with no FLUXER_DOMAIN in .env: not chosen, falls through
+# to the well-known paths (here, neither exists, so the ~/fluxer default).
+home="$tmp/home_b"; mkdir -p "$home"
+mkdir -p "$tmp/proj_b" && : > "$tmp/proj_b/docker-compose.yml"
+printf '[{"Name":"projb","Status":"running(1)","ConfigFiles":"%s/docker-compose.yml"}]\n' "$tmp/proj_b" > "$tmp/ls.json"
+gd env FLUXER_OPS_YES=1 > /dev/null 2>&1
+[ -f "$home/fluxer/ops/setup.sh" ] && pass "docker: domain-less project ignored, falls back" || fail "docker: domain-less project ignored, falls back"
+[ -e "$tmp/proj_b/ops" ] && fail "docker: domain-less project not cloned into" || pass "docker: domain-less project not cloned into"
+
+# Two compose projects each naming a FLUXER_DOMAIN: never guess between them,
+# fall through to the well-known paths (here, the ~/fluxer default) instead.
+home="$tmp/home_c"; mkdir -p "$home"
+mkdir -p "$tmp/proj_c1" "$tmp/proj_c2"
+printf 'FLUXER_DOMAIN=c1.test\n' > "$tmp/proj_c1/.env"; : > "$tmp/proj_c1/docker-compose.yml"
+printf 'FLUXER_DOMAIN=c2.test\n' > "$tmp/proj_c2/.env"; : > "$tmp/proj_c2/docker-compose.yml"
+printf '[{"Name":"c1","Status":"running(1)","ConfigFiles":"%s/docker-compose.yml"},{"Name":"c2","Status":"running(1)","ConfigFiles":"%s/docker-compose.yml"}]\n' \
+	"$tmp/proj_c1" "$tmp/proj_c2" > "$tmp/ls.json"
+gd env FLUXER_OPS_YES=1 > /dev/null 2>&1
+[ -f "$home/fluxer/ops/setup.sh" ] && pass "docker: two domain projects, refuses to guess" || fail "docker: two domain projects, refuses to guess"
+[ -e "$tmp/proj_c1/ops" ] && fail "docker: did not settle on project one" || pass "docker: did not settle on project one"
+[ -e "$tmp/proj_c2/ops" ] && fail "docker: did not settle on project two" || pass "docker: did not settle on project two"
+
+# A ConfigFiles value listing several comma-separated compose files (an overlay
+# file alongside the base one, both in the project's directory): the directory
+# comes from the first entry, not mangled by the comma.
+home="$tmp/home_d"; mkdir -p "$home"
+mkdir -p "$tmp/proj_d" && printf 'FLUXER_DOMAIN=d.test\n' > "$tmp/proj_d/.env" \
+	&& : > "$tmp/proj_d/docker-compose.yml" && : > "$tmp/proj_d/docker-compose.override.yml"
+printf '[{"Name":"projd","Status":"running(1)","ConfigFiles":"%s/docker-compose.yml,%s/docker-compose.override.yml"}]\n' \
+	"$tmp/proj_d" "$tmp/proj_d" > "$tmp/ls.json"
+gd env FLUXER_OPS_YES=1 > /dev/null 2>&1
+[ -f "$tmp/proj_d/ops/setup.sh" ] && pass "docker: comma-separated ConfigFiles parsed from the first entry" || fail "docker: comma-separated ConfigFiles parsed from the first entry"
+
 # Arguments after `sh -s --` reach setup.sh.
 env -u FLUXER_DIR HOME="$tmp/home" PATH="$tmp/stub:$PATH" FLUXER_OPS_REPO="$tmp/repo" GET_TEST_OUT="$tmp/called" \
 	FLUXER_OPS_YES=1 setsid -w sh -s -- --domain c.test < "$SRC/get.sh" > /dev/null 2>&1 || true
