@@ -225,12 +225,15 @@ $MARKER
 services:
   app-proxy:
     volumes:
-      - ./ops/patches/$name:$ASSET_DIR/$name:ro
-      - ./ops/patches/$name.br:$ASSET_DIR/$name.br:ro
-      - ./ops/patches/$name.gz:$ASSET_DIR/$name.gz:ro
-      - ./ops/patches/index.html:$STATIC/index.html:ro
-      - ./ops/patches/index.html.br:$STATIC/index.html.br:ro
-      - ./ops/patches/index.html.gz:$STATIC/index.html.gz:ro
+      # Absolute, not ./ops/patches/...: compose resolves relative bind sources
+      # against the compose file's directory (\$FLUXER_DIR), which is only ./ops
+      # when this checkout lives at \$FLUXER_DIR/ops. \$PATCH_DIR is always right.
+      - $PATCH_DIR/$name:$ASSET_DIR/$name:ro
+      - $PATCH_DIR/$name.br:$ASSET_DIR/$name.br:ro
+      - $PATCH_DIR/$name.gz:$ASSET_DIR/$name.gz:ro
+      - $PATCH_DIR/index.html:$STATIC/index.html:ro
+      - $PATCH_DIR/index.html.br:$STATIC/index.html.br:ro
+      - $PATCH_DIR/index.html.gz:$STATIC/index.html.gz:ro
 YAML
 
 	echo "Recreating app-proxy with the patched bundle."

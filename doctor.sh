@@ -98,15 +98,18 @@ check_cron() {
 	elif sudo -n crontab -l -u root 2> /dev/null | grep -v '^[[:space:]]*#' | grep -qF "$OPS/watchdog.sh"; then
 		ok "root cron runs watchdog.sh"
 	else
+		# FLUXER_DIR= is required, not decoration: cron's environment is empty, and
+		# without it a job run from a split ops/ (see setup.sh's check_ops_layout)
+		# would fail need_instance behind the redirect below and do nothing, silently.
 		fail "watchdog.sh is not in root's crontab: nothing repairs the firewalld flush or a stopped stack" \
-			"sudo crontab -e  ->  */10 * * * * $OPS/watchdog.sh >/dev/null 2>&1"
+			"fluxer setup   (or by hand: sudo crontab -e  ->  */10 * * * * FLUXER_DIR=$FLUXER_DIR $OPS/watchdog.sh >/dev/null 2>&1)"
 	fi
 
 	if crontab -l 2> /dev/null | grep -v '^[[:space:]]*#' | grep -qF "$OPS/backup.sh"; then
 		ok "user cron runs backup.sh"
 	else
 		fail "backup.sh is not in $(id -un)'s crontab: no scheduled backups" \
-			"crontab -e  ->  0 3 * * * $OPS/backup.sh >/dev/null 2>&1"
+			"fluxer setup   (or by hand: crontab -e  ->  0 3 * * * FLUXER_DIR=$FLUXER_DIR $OPS/backup.sh >/dev/null 2>&1)"
 	fi
 }
 

@@ -22,7 +22,9 @@ It checks everything before it changes anything, and asks before each change:
 1. **Prerequisites**: installs Docker if it is missing, gives you access to it.
 2. **Your instance**: uses the Fluxer already on the server, or installs one: it checks
    your domain points here, tells you which ports to open at your provider, then runs
-   Fluxer's official installer (checksum-verified).
+   Fluxer's official installer (checksum-verified: the `.sha256` comes from the same
+   place over the same TLS connection, so this catches a corrupted download, not a
+   swapped one - it is not a signature).
 3. **Wiring**: the `fluxer` command, nightly backups, the watchdog.
 4. **Optional**: alerts to your phone or chat, encrypted off-site backups, fixes for
    firewalld and Cloudflare, each offered only when it applies.
@@ -39,7 +41,10 @@ git clone https://github.com/kipavy/fluxer-ops ~/fluxer/ops
 ```
 
 Already running Fluxer somewhere else than `~/fluxer`? It is found through Docker, or
-point at it: `FLUXER_DIR=/path/to/fluxer` before either command.
+point at it: `FLUXER_DIR=/path/to/fluxer` before either command. That is enough for
+`fluxer setup`, `check`, `backup` and the rest, but `fluxer badge-patch` (and
+`update`'s re-apply of it) and backups including `ops/` itself still expect this
+checkout at `<instance>/ops`; `setup.sh` says so if it is not.
 
 ### If the first install does not come up
 

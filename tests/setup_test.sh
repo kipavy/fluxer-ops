@@ -96,6 +96,15 @@ load() {
   rm -f "$tmp/cron/root"; SUDO_OK=0
   out=$(core_wiring); assert_contains "no sudo skips the watchdog" "– " "$out"
   [ -e "$tmp/cron/root" ] && fail "no sudo wrote root's crontab" || pass "no sudo leaves root's crontab alone"
+
+  # --check without sudo cannot read root's crontab at all, so whether the
+  # watchdog job is really there is unknown, not confirmed missing - but README
+  # and doctor.sh both promise --check exits 1 if anything is missing, so this
+  # must count as missing rather than being silently skipped.
+  CHECK_ONLY=1 MISSING=0
+  core_wiring > "$tmp/out3"
+  assert_eq "unverified root cron under --check counts as missing" 1 "$MISSING"
+  assert_contains "unverified root cron is reported, not silently skipped" "cannot verify without sudo" "$(cat "$tmp/out3")"
   finish )
 
 # --- prerequisites
@@ -297,6 +306,75 @@ EOF
   rc=0; ( phase_install > "$tmp/o4" 2>&1 ) || rc=$?
   assert_eq "bad checksum exits 4" 4 "$rc"
   assert_contains "bad checksum refuses to run" "did not verify" "$(cat "$tmp/o4")"
+  finish )
+
+# --- verify-here, execute-there: phase_install must run the checksummed copy
+# in $TMP, not the copy it also leaves at $FLUXER_DIR/install.sh for the
+# record (anyone who can write $FLUXER_DIR could otherwise swap that one
+# between the copy and the run).
+( load
+  mkdir -p "$tmp/up3" "$tmp/new3"
+  T3="$tmp/t3"; mkdir -p "$T3"
+  cat > "$tmp/up3/install.sh" <<EOF
+#!/bin/sh
+# \$0 is the path sh was told to run. If phase_install ran the record copy at
+# \$FLUXER_DIR/install.sh instead of the checksummed one in \$TMP, \$0 would be
+# under $tmp/new3 instead and this exits 1.
+case "\$0" in
+	"$T3"/*) exit 0 ;;
+	*) echo "ran from \$0, not $T3" >&2; exit 1 ;;
+esac
+EOF
+  (cd "$tmp/up3" && sha256sum install.sh > install.sh.sha256)
+  INSTALLER_URL="file://$tmp/up3/install.sh" TMP="$T3"
+  FLUXER_DIR="$tmp/new3" DOMAIN=chat.example.test EMAIL=me@example.test ALLOW_ROOT=''
+  # If phase_install ran the $FLUXER_DIR copy instead of the $TMP one, the stub's
+  # own $0 check above would exit 1 and this `die`s under set -eu, failing the test.
+  phase_install > "$tmp/pinst" 2>&1
+  assert_eq "marks a new instance" 1 "$NEW_INSTANCE"
+  [ -f "$tmp/new3/install.sh" ] && pass "still leaves a copy at FLUXER_DIR for the record" \
+	|| fail "still leaves a copy at FLUXER_DIR for the record"
+  finish )
+
+# --- phase_instance: found, the domain-less edge case, and half-installed
+( load
+  # Found: both files present.
+  FLUXER_DIR="$tmp/inst" CHECK_ONLY=0
+  out=$(phase_instance)
+  assert_contains "existing instance found" "Fluxer found at $tmp/inst (https://chat.example.test)" "$out"
+
+  # .env exists but has no FLUXER_DOMAIN (edited by hand, or a step died before
+  # writing it): still found, but "(https://)" would read as live and working
+  # when nothing is actually being served.
+  mkdir -p "$tmp/nodomain"
+  : > "$tmp/nodomain/docker-compose.yml"
+  : > "$tmp/nodomain/.env"
+  FLUXER_DIR="$tmp/nodomain"
+  out=$(phase_instance)
+  case "$out" in
+    *"(https://)"*) fail "empty domain: does not print a bare (https://)" ;;
+    *) pass "empty domain: does not print a bare (https://)" ;;
+  esac
+  assert_contains "empty domain: says so honestly" "no FLUXER_DOMAIN" "$out"
+
+  # Half-installed: docker-compose.yml without .env. A plain re-run must name
+  # the file in the way rather than walk into phase_install and upstream's
+  # bare "message above" refusal to overwrite it.
+  mkdir -p "$tmp/half1"
+  : > "$tmp/half1/docker-compose.yml"
+  FLUXER_DIR="$tmp/half1"
+  rc=0; out=$(phase_instance 2>&1) || rc=$?
+  assert_eq "half-installed (compose only) exits 3" 3 "$rc"
+  assert_contains "half-installed names the directory" "$tmp/half1" "$out"
+  assert_contains "half-installed names the missing file" ".env" "$out"
+
+  # And the other way round: .env without docker-compose.yml.
+  mkdir -p "$tmp/half2"
+  : > "$tmp/half2/.env"
+  FLUXER_DIR="$tmp/half2"
+  rc=0; out=$(phase_instance 2>&1) || rc=$?
+  assert_eq "half-installed (.env only) exits 3" 3 "$rc"
+  assert_contains "half-installed (.env only) names the file in the way" ".env" "$out"
   finish )
 
 # --- extras

@@ -67,8 +67,12 @@ prompt() {
 prompt_secret() {
 	printf '  %s: ' "$1" >&2
 	stty -echo 2> /dev/null || true
-	read -r _reply || { stty echo 2> /dev/null || true; die 2 "No answer (input closed)."; }
+	# Ctrl-C while `read` is blocked here would otherwise skip the stty echo
+	# below and leave the terminal silently not echoing keystrokes afterwards.
+	trap 'stty echo 2> /dev/null || true; exit 130' INT TERM
+	read -r _reply || { stty echo 2> /dev/null || true; trap - INT TERM; die 2 "No answer (input closed)."; }
 	stty echo 2> /dev/null || true
+	trap - INT TERM
 	printf '\n' >&2
 	printf '%s' "$_reply"
 }
@@ -157,6 +161,9 @@ phase_docker() {
 	else
 		st_bad "$_me cannot use Docker (not in the docker group)"
 		if [ "$CHECK_ONLY" -eq 1 ]; then MISSING=1; return 0; fi
+		say "    The docker group is effectively root on this host (a member can bind-mount the"
+		say "    host filesystem into a container and read or write anything root can) - the same"
+		say "    trust this script asks about above when it is itself run as root."
 		ask "Add $_me to the docker group?" y || die 2 "Add yourself with: sudo usermod -aG docker $_me, log in again, and run this again."
 		[ "$SUDO_OK" -eq 1 ] || die 2 "That needs sudo: sudo usermod -aG docker $_me"
 		as_root usermod -aG docker "$_me"
@@ -333,11 +340,17 @@ installer_meaning() {
 phase_install() {
 	fetch_installer
 	mkdir -p "$FLUXER_DIR"
+	# A record for update.sh to refresh later, NOT what is about to run: $TMP is a
+	# private 0700 mktemp directory, but $FLUXER_DIR is not, so between this copy
+	# landing and the `sh` below, anyone who can write $FLUXER_DIR could otherwise
+	# swap in their own script and have it run with $ALLOW_ROOT/sudo behind it.
+	# Running the $TMP copy directly closes that: the bytes executed are exactly
+	# the bytes fetch_installer just checksum-verified.
 	cp "$TMP/install.sh" "$FLUXER_DIR/install.sh"
 	st_do "installing Fluxer into $FLUXER_DIR (about 3.5 GB of images: a few minutes)"
 	_rc=0
 	# shellcheck disable=SC2086 # ALLOW_ROOT is empty or one flag
-	sh "$FLUXER_DIR/install.sh" --dir "$FLUXER_DIR" --domain "$DOMAIN" --email "$EMAIL" --non-interactive $ALLOW_ROOT || _rc=$?
+	sh "$TMP/install.sh" --dir "$FLUXER_DIR" --domain "$DOMAIN" --email "$EMAIL" --non-interactive $ALLOW_ROOT || _rc=$?
 	[ "$_rc" -eq 0 ] || die "$_rc" "The Fluxer installer stopped: $(installer_meaning "$_rc"). Fix that and run setup again."
 	NEW_INSTANCE=1
 	st_ok "Fluxer is installed"
@@ -346,7 +359,14 @@ phase_install() {
 phase_instance() {
 	if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/docker-compose.yml" ] && [ -f "$FLUXER_DIR/.env" ]; then
 		DOMAIN=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
-		st_ok "Fluxer found at $FLUXER_DIR (https://$DOMAIN)"
+		if [ -n "$DOMAIN" ]; then
+			st_ok "Fluxer found at $FLUXER_DIR (https://$DOMAIN)"
+		else
+			# .env exists but has no FLUXER_DOMAIN yet (edited by hand, or written by
+			# a step that died before this line): "(https://)" would read as found
+			# and working, when nothing is actually being served yet.
+			st_ok "Fluxer found at $FLUXER_DIR (no FLUXER_DOMAIN in .env yet)"
+		fi
 		return 0
 	fi
 	if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -363,6 +383,16 @@ phase_instance() {
 		fi
 	fi
 	export FLUXER_DIR
+	if [ -f "$FLUXER_DIR/docker-compose.yml" ] || [ -f "$FLUXER_DIR/.env" ]; then
+		# Exactly one of the two files upstream's installer writes together is
+		# here: an interrupt, or a failure partway through generating secrets, left
+		# this half-installed. Upstream refuses to overwrite what exists (exit 3)
+		# rather than finishing the rest, so without this a plain re-run would just
+		# land back in phase_install and wedge on the same refusal, with only
+		# "message above" (installer_meaning 3) to go on.
+		if [ -f "$FLUXER_DIR/docker-compose.yml" ]; then _have=docker-compose.yml; else _have=.env; fi
+		die 3 "$FLUXER_DIR has $_have but not a complete instance (docker-compose.yml and .env both need to be there) - a previous install looks interrupted. The Fluxer installer will refuse to overwrite $_have. Move or remove $FLUXER_DIR/$_have (read it first: it may hold real secrets), then run this again."
+	fi
 	say "  No Fluxer instance yet: installing one into $FLUXER_DIR."
 	ask_domain_email
 	phase_dns
@@ -411,6 +441,21 @@ link_step() { # <name> <link> <target>
 	fi
 }
 
+# README and lib.sh both say a Fluxer found through Docker is fine to point at,
+# from anywhere. That is true for most of ops/ - every script takes FLUXER_DIR
+# from lib.sh - but not for everything: badge-patch.sh's compose override, and
+# `fluxer update`'s re-apply of it, and backup.sh's `cp -r ops` all assume ops/
+# sits at $FLUXER_DIR/ops. Say so plainly rather than let any of those surprise
+# someone later. Not a MISSING: the instance itself is fine, only these are not.
+check_ops_layout() {
+	[ -n "$FLUXER_DIR" ] || return 0
+	[ "$OPS" = "$FLUXER_DIR/ops" ] && return 0
+	st_skip "ops/ is at $OPS, not $FLUXER_DIR/ops"
+	say "    Degraded because of that: \`fluxer badge-patch\` (and update's re-apply of it) will"
+	say "    not find its files there, and nightly backups will not include ops/. Everything"
+	say "    else (finding the instance, cron, backups of the instance itself) still works."
+}
+
 core_wiring() {
 	link_step "fluxer command" "$BIN_DIR/fluxer" "$OPS/fluxer"
 	link_step "tab completion" "$COMPLETION_DIR/fluxer" "$OPS/completion.bash"
@@ -429,7 +474,17 @@ core_wiring() {
 		_file=$OPS/${_script%% *}
 		_label="$_script ($_who cron, $_when)"
 		if [ "$_who" = root ] && [ "$SUDO_OK" -ne 1 ]; then
-			st_skip "$_label: needs sudo. Without it nothing restarts the stack after a crash or a firewalld reload."
+			if [ "$CHECK_ONLY" -eq 1 ]; then
+				# --check without passwordless sudo cannot read root's crontab, so
+				# whether this job is really there is simply unknown. README and
+				# doctor.sh both say --check exits 1 if anything is missing; an
+				# unverified root cron job is exactly the kind of gap that leaves
+				# the stack down after a crash, so it counts as missing, not skipped.
+				st_bad "$_label: cannot verify without sudo"
+				MISSING=1
+			else
+				st_skip "$_label: needs sudo. Without it nothing restarts the stack after a crash or a firewalld reload."
+			fi
 			continue
 		fi
 		if cron_list "$_who" | grep -v '^[[:space:]]*#' | grep -qF "$_file"; then
@@ -631,6 +686,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 say "Fluxer"
 phase_instance
+check_ops_layout
 
 say ""
 say "Wiring"
