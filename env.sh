@@ -101,9 +101,15 @@ encode() {
 
 # Services whose resolved config references ${KEY}: anchors and merge keys are
 # already expanded, so a variable in a shared x- block counts for every service
-# that uses it. --no-interpolate keeps values out of what is read.
+# that uses it. --no-interpolate keeps values out of what is read. Compose refuses
+# --no-interpolate when a number comes from a variable (the nats healthcheck's
+# retries, since the 2026-10 compose file); the interpolated config then still names
+# each service's environment keys. It is only piped, never shown. Neither: no hint.
 services_using() {
-	(cd "$FLUXER_DIR" && docker compose config --no-interpolate --format json 2>/dev/null) \
+	cfg=$(cd "$FLUXER_DIR" && docker compose config --no-interpolate --format json 2>/dev/null) || cfg=''
+	[ -n "$cfg" ] || cfg=$(cd "$FLUXER_DIR" && docker compose config --format json 2>/dev/null) || cfg=''
+	[ -n "$cfg" ] || return 0
+	printf '%s' "$cfg" \
 		| python3 -c '
 import json, re, sys
 key = sys.argv[1]
