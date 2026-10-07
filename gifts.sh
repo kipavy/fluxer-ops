@@ -7,19 +7,19 @@
 #   gifts.sh revoke <code>                        only while unredeemed
 #   gifts.sh redeem <code> <user>                 apply one to an account
 #
-# Upstream has gift codes, but a self-hosted instance can neither mint nor redeem them:
+# Upstream has gift codes, but a self-hosted instance cannot mint them:
+# POST /admin/gift-codes throws FeatureNotAvailableSelfHostedError when
+# instance.self_hosted is set, and the admin panel's /gift-codes page redirects to the
+# dashboard (admin/controllers/CodesAdminController.ts, fluxer_admin/src/routes/codes.rs).
 #
-#   - POST /admin/gift-codes throws FeatureNotAvailableSelfHostedError when
-#     instance.self_hosted is set, and the admin panel's /gift-codes page redirects to
-#     the dashboard (admin/controllers/CodesAdminController.ts, fluxer_admin/src/routes/codes.rs).
-#   - GET /gifts/:code and POST /gifts/:code/redeem live in StripeController, which
-#     app/ControllerRegistry.ts only mounts when self_hosted is off. The instance
-#     answers {"code":"NOT_FOUND"} - a missing route, not UNKNOWN_GIFT_CODE - so a
-#     /gift/<code> link opens in the app and says the code does not exist.
+# Redeeming works in the app since the 2026-10 images: GET /gifts/:code answers the
+# gift and POST /gifts/:code/redeem is mounted (401 without a session, where a missing
+# route is a 404). So 'create' prints https://<FLUXER_DOMAIN>/gift/<code> links that
+# anyone can open and redeem, and 'redeem' stays for applying one to an account here.
 #
-# So this script does, row for row, what the api would have done, and both halves are
-# commands here rather than links. What it mirrors (fluxer_api/src/api/ upstream,
-# checked against the source shipped in the running fluxer-api image):
+# This script does, row for row, what the api would have done. What it mirrors
+# (fluxer_api/src/api/ upstream, checked against the source shipped in the running
+# fluxer-api image):
 #
 #   create  AdminCodeGenerationService.generateGiftCodes -> GiftCodeRepository.createGiftCode:
 #           a 'gift_codes' row (code = RandomUtils.randomString(32) over A-Za-z0-9,
@@ -43,9 +43,11 @@
 #           second fails; here they are one transaction.
 #
 # Not done, deliberately:
-#   - lifetime (Visionary) gifts. Upstream can only mint them from a Stripe checkout,
-#     and redeeming one allocates a visionary_slots row and joins the Visionaries
-#     guild, neither of which exists here. 'fluxer premium <user>' is the lifetime path.
+#   - lifetime (Visionary) gifts. Upstream mints them only from a Stripe checkout, and
+#     redeeming one (duration_quantity 0) goes through setPremiumLifetime, which
+#     reserves a visionary slot and then throws unless FLUXER_VISIONARIES_GUILD_ID and
+#     FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID are set. 'fluxer premium <user>' is
+#     the lifetime path.
 #   - a note or label. The row has no such field and the api would never read one.
 #   - redeeming onto an open-ended grant from 'fluxer premium --subscriber' (type 1, no
 #     end date). The api would accept it, but it would give that grant an end date:
@@ -71,12 +73,16 @@ MAX_QUANTITY=3650
 
 die() { printf 'gifts: %s\n' "$*" >&2; exit 1; }
 
+# Plain docker exec, never `docker compose exec`: compose writes its own warnings to
+# stderr (an unset FLUXER_*_NODE_OPTIONS, for one), and callers capture stderr with
+# stdout, so those lines would be parsed as query output. Only the lookup of the
+# postgres container goes through compose, with its stderr dropped.
 psql_() {
-	if [ -n "$PG_CONTAINER" ]; then
-		docker exec -i "$PG_CONTAINER" psql -X -q -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@"
-	else
-		(cd "$FLUXER_DIR" && docker compose exec -T postgres psql -X -q -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@")
+	if [ -z "$PG_CONTAINER" ]; then
+		PG_CONTAINER=$(cd "$FLUXER_DIR" && docker compose ps -q postgres 2> /dev/null) || PG_CONTAINER=''
+		[ -n "$PG_CONTAINER" ] || die "the postgres service in $FLUXER_DIR is not running"
 	fi
+	docker exec -i "$PG_CONTAINER" psql -X -q -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@"
 }
 
 # Every query is a quoted heredoc on stdin and every input goes in as a psql variable
@@ -112,8 +118,8 @@ usage: gifts.sh create [--duration 1m] [--count N]
   <code> is the 32-character code, or a link ending in it.
   <user> is a username, or username#tag when several accounts share the name.
 
-Gift links do not work on a self-hosted instance (the api does not mount /gifts),
-so codes are handed out as codes and redeemed here. Lifetime gifts are not
+create prints a https://<domain>/gift/<code> link per code: send it in a chat and
+whoever opens it first can redeem it in the app. Lifetime gifts are not
 supported: use 'fluxer premium <user>' for Visionary.
 USAGE
 }
@@ -277,15 +283,20 @@ SQL
 	else
 		printf 'Created %s gift codes: %s of Plutonium each.\n\n' "$count" "$label"
 	fi
-	for c in $codes; do printf '  %s\n' "$c"; done
-	cat <<'EOF'
+	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1 | tr -d '\r"' | sed "s/'//g")
+	if [ -n "$domain" ]; then
+		for c in $codes; do printf '  https://%s/gift/%s\n' "${domain%/}" "$c"; done
+		cat <<'EOF'
 
-Redeem one for an account with:
+Send a link in a chat: whoever opens it first can redeem it in the app (the account
+needs a verified email). Or apply one to an account here:
   fluxer gifts redeem <code> <user>
-
-Hand out the code itself, not a /gift/ link: the api does not mount the gift routes on
-a self-hosted instance, so the app would report the link as an unknown gift.
 EOF
+	else
+		for c in $codes; do printf '  %s\n' "$c"; done
+		printf '\nNo FLUXER_DOMAIN in %s/.env, so no links: the link is https://<domain>/gift/<code>.\n' "$FLUXER_DIR"
+		echo 'Or apply one to an account here: fluxer gifts redeem <code> <user>'
+	fi
 }
 
 # Shared SQL for list and show, as a view over the rows: status, duration label, and

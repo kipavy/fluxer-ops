@@ -420,22 +420,23 @@ using it.
 ## Plutonium gift codes: `fluxer gifts`
 
 ```sh
-fluxer gifts create --duration 1m --count 5   # Nd, Nw, Nm, Ny; at most 100
+fluxer gifts create --duration 1m --count 5   # Nd, Nw, Nm, Ny; at most 100; prints links
 fluxer gifts list [--unredeemed | --redeemed | --revoked]
 fluxer gifts show <code>
 fluxer gifts revoke <code>                    # only while unredeemed
 fluxer gifts redeem <code> <user>             # user or user#tag
 ```
 
-Upstream has Plutonium gift codes, but **a self-hosted instance can neither mint
-nor redeem them**. `POST /admin/gift-codes` throws
-`FeatureNotAvailableSelfHostedError` (`admin/controllers/CodesAdminController.ts`),
-the admin panel's gift page redirects away, and the redeem routes live in
-`StripeController`, which `app/ControllerRegistry.ts` mounts only when
-`self_hosted` is off -- this instance answers them with a bare `NOT_FOUND`. So a
-`/gift/<code>` link opens in the app and reports an unknown gift. Hand out the
-**code**, and redeem it here. Making the in-app flow work would take an **api**
-patch (mounting those routes); a client patch alone cannot.
+Upstream has Plutonium gift codes, but **a self-hosted instance cannot mint
+them**: `POST /admin/gift-codes` throws `FeatureNotAvailableSelfHostedError`
+(`admin/controllers/CodesAdminController.ts`) and the admin panel's gift page
+redirects away. `create` writes the rows instead.
+
+**Redeeming works in the app** since the 2026-10 images: `GET /gifts/<code>`
+answers the gift and `POST /gifts/<code>/redeem` is mounted. So `create` prints a
+`https://<FLUXER_DOMAIN>/gift/<code>` link per code; send it in a chat and whoever
+opens it first redeems it (the account needs a verified email). `redeem` still
+applies a code to an account from here.
 
 Both halves write what the api would have, checked field by field by running
 upstream's own `AdminCodeGenerationService`, `GiftCodeRepository` and
@@ -457,7 +458,10 @@ premium on the user's next session or profile view, badge included; nothing has 
 run. That is why `redeem` also refuses an account holding open-ended premium from
 `fluxer premium --subscriber`: the gift would put an end date on a grant that had
 none. Lifetime gifts are not offered: upstream mints those only from a Stripe
-checkout, and `fluxer premium <user>` is the lifetime path here.
+checkout, and redeeming one (`duration_quantity` 0) reserves a Visionary slot and
+then fails unless `FLUXER_VISIONARIES_GUILD_ID` and
+`FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID` are set. `fluxer premium <user>` is
+the lifetime path here.
 
 In the self-hosted default `premium_mode` of `everyone`, every account already has
 the perks, so a gift mostly means the badge -- which needs the badge patch; `redeem`
