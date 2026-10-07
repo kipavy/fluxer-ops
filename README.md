@@ -128,7 +128,8 @@ Three commands are worth knowing before you need them:
 
 `fluxer setup` adds them, and never rewrites a line already there:
 
-- `watchdog.sh` every 10 minutes in **root's** crontab (it needs iptables and systemctl)
+- `watchdog.sh` every 10 minutes in **root's** crontab (it needs iptables and systemctl);
+  it also runs `premium.sh --repair`, so that needs no line of its own
 - `backup.sh` at 03:00 and `disk.sh --record` at 03:30 in the user's
 
 Each line carries `FLUXER_DIR=`, since cron starts with an empty environment.
@@ -365,7 +366,8 @@ does not have -- the page answers 200 and the app loads nothing. So:
 
 - **`fluxer update`** reverts the patch before applying, re-applies after the
   health checks pass, and if the update itself fails leaves the patch off and says
-  so. Off is a working app without the badge.
+  so. Off is a working app without the Visionary extras (the Plutonium badge itself
+  needs no patch).
 - **`fluxer rollback`** does the same around `install.sh --rollback`, for the mirror
   image of the problem: a patch built from the newer release names chunks the older
   one never had.
@@ -391,7 +393,7 @@ fluxer premium <user> --duration 1m     # a set length: Nd, Nw, Nm or Ny; ends o
 fluxer premium <user> --subscriber      # open-ended, "subscriber since" badge
 fluxer premium <user> --off             # revoke
 fluxer premium --list                   # who has premium, and until when
-fluxer premium --repair                 # keep lifetime grants from being stripped (cron)
+fluxer premium --repair                 # keep lifetime grants from being stripped (the watchdog runs it)
 ```
 
 `<user>` is a username, or `username#tag` when several accounts share the name.
@@ -460,7 +462,7 @@ fluxer gifts show <code>
 fluxer gifts revoke <code>                    # only while unredeemed
 fluxer gifts rm <code>... [--force]           # delete outright; --force for redeemed ones
 fluxer gifts redeem <code> <user>             # user or user#tag
-fluxer gifts setup-lifetime [--community C] [--role R]   # once, for lifetime links
+fluxer gifts setup-lifetime [--community C] [--role R]   # the first lifetime create runs it for you
 ```
 
 Upstream has Plutonium gift codes, but **a self-hosted instance cannot mint
@@ -506,7 +508,9 @@ Redeemed in the app it goes through `setPremiumLifetime`, which reserves a Visio
 number and **joins the account to the instance's Visionaries community, with its
 Visionary role** -- `FLUXER_VISIONARIES_GUILD_ID` and
 `FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID`. That is one community for the whole
-instance, whichever community a link is posted in. Without it the api refuses the
+instance, whichever community a link is posted in. The join and the role only
+happen when a **new** number is handed out: an account that already had one (a
+returning Visionary) gets that number back and nothing else. Without it the api refuses the
 redemption and rolls the code back. A missing role alone would not fail it (the api
 only logs that), but it writes the dangling role id into the member, so the CLI
 requires both.
