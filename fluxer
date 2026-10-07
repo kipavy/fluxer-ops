@@ -42,7 +42,7 @@ Accounts
              [--subscriber]  Open-ended, "subscriber since" badge instead of Visionary
              [--off]         Revoke it
              [--list]        Who has premium, and until when
-             [--repair]      Drop leftover end dates from lifetime accounts (daily cron)
+             [--repair]      Drop leftover end dates from lifetime accounts (watchdog runs it)
   fluxer gifts ...           Plutonium gift codes and links, lifetime included (fluxer gifts --help)
   fluxer badge-patch         Re-apply just the client-side Visionary badge patch
              [--revert]      Drop it and go back to the stock bundle

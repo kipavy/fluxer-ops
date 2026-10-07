@@ -101,10 +101,10 @@ Three commands are worth knowing before you need them:
 | Script | Run by | What it does |
 | --- | --- | --- |
 | `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, container health, and that every script the app shell names resolves. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
-| `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, and brings the stack up if services are missing. |
+| `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, brings the stack up if services are missing, and runs `premium.sh --repair`. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
-| `premium.sh` | you; user cron, 04:15 daily (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
+| `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
 | `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
@@ -446,8 +446,9 @@ using it.
 running keeps that end date. The api takes the later of the two as the end, and
 once it is more than `PREMIUM_GRACE_PERIOD_DAYS` (3) past, it strips premium on the
 next session start -- lifetime included. `--repair` drops every end date from
-lifetime accounts; `fluxer setup` installs it as a daily cron job, well inside the
-3 days, and it is silent when there is nothing to fix. Grants made by this CLI
+lifetime accounts; the watchdog runs it every 10 minutes, well inside the 3 days,
+and it is silent when there is nothing to fix (anything it fixes lands in the
+watchdog log). Grants made by this CLI
 never leave one behind.
 
 ## Plutonium gift codes: `fluxer gifts`

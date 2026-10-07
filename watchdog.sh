@@ -1,7 +1,8 @@
 #!/bin/sh
 # Runs from ROOT cron every 10 minutes.
 #
-# It fixes the two failure modes that have actually taken this instance down:
+# It fixes the two failure modes that have actually taken this instance down
+# (and, last, keeps lifetime premium from being stripped - see section 4):
 #   1. firewalld reloads flush Docker's iptables chains. Every published port
 #      then fails to bind and the whole stack dies silently. This is what kept
 #      the instance down for two weeks in Sept 2026 with nobody noticing.
@@ -95,4 +96,19 @@ Run $OPS/check.sh for the full picture."
 	fi
 else
 	notify ok health "check.sh passes again."
+fi
+
+# 4. Keep lifetime premium from being stripped. Redeeming a lifetime gift in the app
+#    leaves a running time-limited gift's end date on the account, and the api strips
+#    it - lifetime included - 3 days after that date (premium.sh --repair explains).
+#    Every 10 minutes is well inside those 3 days. Silent when nothing needed fixing;
+#    whatever it fixes, or a failure, goes to the log. Never fails the watchdog.
+if [ -n "$(docker compose ps -q --status running postgres 2> /dev/null)" ]; then
+	if fixed=$("$OPS/premium.sh" --repair 2>&1); then
+		printf '%s\n' "$fixed" | while IFS= read -r line; do
+			[ -z "$line" ] || log "$line"
+		done
+	else
+		log "premium.sh --repair failed: $(printf '%s' "$fixed" | head -n 3 | tr '\n' ' ')"
+	fi
 fi

@@ -6,7 +6,7 @@
 #   premium.sh <user> --subscriber      open-ended, "subscriber since" badge
 #   premium.sh <user> --off             revoke
 #   premium.sh --list                   who has premium
-#   premium.sh --repair                 keep lifetime grants from being stripped (cron)
+#   premium.sh --repair                 keep lifetime grants from being stripped (watchdog)
 #
 # <user> is a username, or username#tag when several accounts share the name.
 #
@@ -39,8 +39,8 @@
 # running keeps that end date. getEffectivePremiumUntil takes the later of the two,
 # and once it is past by more than PREMIUM_GRACE_PERIOD_DAYS (3), the api strips the
 # premium on the next session start (shouldStripExpiredPremium) - lifetime included.
-# --repair drops every end date from lifetime accounts; setup.sh runs it daily, well
-# inside the 3 days. Grants made by this script never leave one behind.
+# --repair drops every end date from lifetime accounts; watchdog.sh runs it every
+# 10 minutes, well inside the 3 days. Grants made by this script never leave one behind.
 #
 # Values are written in the KV store's own encoding: dates as
 # {"value":...,"__fluxer_type":"date"}, plain numbers bare, and `version` (the
@@ -100,7 +100,7 @@ usage: premium.sh <user> [--duration D | --subscriber | --off]
   --off            revoke premium and the badge
   --list           show every account's premium state
   --repair         drop leftover end dates from lifetime accounts, which would
-                   otherwise get them stripped (runs daily from cron)
+                   otherwise get them stripped (the watchdog runs it every 10 min)
 
   <user> is a username, or username#tag when several accounts share the name.
 USAGE
