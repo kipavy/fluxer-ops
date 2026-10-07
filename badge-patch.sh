@@ -1,20 +1,28 @@
 #!/bin/sh
-# badge-patch.sh - bring the Plutonium badge back on this self-hosted instance.
+# badge-patch.sh - show the Visionary badge on this self-hosted instance.
 #
-# The web client hides the premium badge whenever it runs self-hosted. From
-# src/features/user/components/popouts/UserProfileBadges.tsx:
+# The web client hides self-hosted-only bits of the profile badges. From
+# src/features/user/components/popouts/UserProfileBadges.tsx (2026-10 releases):
 #
 #   const selfHosted = RuntimeConfig.isSelfHosted();
 #   ...
-#   if (!selfHosted && profile?.premiumType && profile.premiumType !== UserPremiumTypes.NONE) {
-#           result.push({type: 'icon', key: 'premium', iconUrl: badgeAssetUrl('plutonium.svg'), ...});
+#   if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME) {
+#           tooltipText = "Fluxer Visionary since ..."; badgeUrl = helpArticle('visionary');
+#   } else if (profile.premiumSince) { tooltipText = "... subscriber since ..."; }
+#   ...
+#   if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME
+#           && profile.premiumLifetimeSequence != null) {
+#           result.push({type: 'text', key: 'visionary_id', text: `#${sequence}`, ...});
 #
-# The gate is client-side only. The API serves premium_type to profile viewers on
-# any instance (UserAccountLookupService strips it only for BADGE_HIDDEN or a
-# restricted profile), and /badges/plutonium.svg ships in the fluxer-static image.
-# So the badge comes back by deleting `!selfHosted &&` from that one condition.
-# The STAFF badge has no such gate, which is why that one shows on a stock
-# instance while premium and partner do not.
+# The Plutonium badge itself is no longer gated: it shows whenever the instance
+# reports premium_enabled (premium mode 'mirror'). Earlier releases gated the whole
+# premium badge instead (`!selfHosted && profile?.premiumType && ...`); that gate is
+# still removed if a bundle has it. So this deletes `!selfHosted` from each of those
+# conditions, and a lifetime account shows "Visionary since" and "Visionary ID #n"
+# exactly as on fluxer.app. All gates are client-side only: the API serves
+# premium_type, premium_since and premium_lifetime_sequence to profile viewers on any
+# instance (UserAccountLookupService strips them only for BADGE_HIDDEN or a restricted
+# profile). The STAFF badge has no such gate.
 #
 # There is no environment variable for this, and flipping FLUXER_SELF_HOSTED would
 # change the setup flow, registration and the Stripe paths too. So this patches the
@@ -114,27 +122,54 @@ const zlib = require('node:zlib');
 const crypto = require('node:crypto');
 const chunk = fs.readFileSync('chunk.name', 'utf8').trim();
 
-// Minified identifiers change between builds, so anchor on the shape of the
-// condition rather than on this release's variable names:
-//   !E && (null == t ? void 0 : t.premiumType) && t.premiumType !== g.Gm.NONE
-const GATE =
-	/!([A-Za-z_$][\w$]*)&&\(null==([A-Za-z_$][\w$]*)\?void 0:\2\.premiumType\)&&\2\.premiumType!==([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\.NONE/g;
+// Minified identifiers change between builds, so anchor on the shape of each
+// condition rather than on this release's variable names. Each gate may appear at
+// most once; every gate found is removed, and at least one must be.
+const ID = '[A-Za-z_$][\\w$]*';
+const PATH = `${ID}(?:\\.${ID})*`;
+const GATES = [
+	{
+		// if (N || t.premiumType !== b.Gm.LIFETIME) {subscriber tooltip} else {Visionary tooltip}
+		name: 'Visionary since tooltip',
+		re: new RegExp(`\\((${ID})\\|\\|(${ID})\\.premiumType!==(${PATH})\\.LIFETIME\\)`, 'g'),
+		to: (_m, _selfHosted, profile, constants) => `(${profile}.premiumType!==${constants}.LIFETIME)`,
+	},
+	{
+		// !N && t.premiumType === b.Gm.LIFETIME && null != t.premiumLifetimeSequence
+		name: 'Visionary ID badge',
+		re: new RegExp(`!(${ID})&&(${ID})\\.premiumType===(${PATH})\\.LIFETIME&&null!=\\2\\.premiumLifetimeSequence`, 'g'),
+		to: (_m, _selfHosted, profile, constants) =>
+			`${profile}.premiumType===${constants}.LIFETIME&&null!=${profile}.premiumLifetimeSequence`,
+	},
+	{
+		// Earlier releases: !E && (null == t ? void 0 : t.premiumType) && t.premiumType !== g.Gm.NONE
+		name: 'Plutonium badge (earlier releases)',
+		re: new RegExp(`!(${ID})&&\\(null==(${ID})\\?void 0:\\2\\.premiumType\\)&&\\2\\.premiumType!==(${PATH})\\.NONE`, 'g'),
+		to: (_m, _selfHosted, profile, constants) =>
+			`(null==${profile}?void 0:${profile}.premiumType)&&${profile}.premiumType!==${constants}.NONE`,
+	},
+];
 
 const src = fs.readFileSync(chunk, 'utf8');
-const hits = src.match(GATE);
-if (!hits) {
-	console.error('patch: the self-hosted premium-badge gate is not in this bundle');
-	process.exit(3);
+let patched = src;
+const removed = [];
+for (const gate of GATES) {
+	const hits = patched.match(gate.re);
+	if (!hits) continue;
+	if (hits.length !== 1) {
+		console.error(`patch: expected the ${gate.name} gate at most once, found it ${hits.length} times`);
+		process.exit(3);
+	}
+	patched = patched.replace(gate.re, gate.to);
+	gate.re.lastIndex = 0;
+	if (gate.re.test(patched)) {
+		console.error(`patch: the ${gate.name} replacement did not take`);
+		process.exit(3);
+	}
+	removed.push(gate.name);
 }
-if (hits.length !== 1) {
-	console.error(`patch: expected the gate once, found it ${hits.length} times`);
-	process.exit(3);
-}
-const patched = src.replace(GATE, (_m, _selfHosted, profile, constants) =>
-	`(null==${profile}?void 0:${profile}.premiumType)&&${profile}.premiumType!==${constants}.NONE`,
-);
-if (patched === src || GATE.test(patched)) {
-	console.error('patch: the replacement did not take');
+if (removed.length === 0) {
+	console.error('patch: none of the self-hosted badge gates is in this bundle');
 	process.exit(3);
 }
 
@@ -173,7 +208,8 @@ if (!html.includes(`/assets/${chunk}`)) {
 publish('index.html', Buffer.from(html.replaceAll(`/assets/${chunk}`, `/assets/${name}`), 'utf8'), 5);
 
 fs.writeFileSync('patched.name', `${name}\n`);
-console.log(`  gate removed, published as ${name} (${body.length} bytes) and repointed index.html`);
+console.log(`  removed: ${removed.join(', ')}`);
+console.log(`  published as ${name} (${body.length} bytes) and repointed index.html`);
 NODE
 }
 
@@ -186,11 +222,16 @@ cmd_apply() {
 	# Read the bundle out of the image, not out of the running container, so a
 	# re-run always starts from the pristine bytes of the current release.
 	echo "Locating the bundle chunk that renders the badges, in $IMAGE."
-	chunk=$(in_image_ro "grep -l plutonium.svg $ASSET_DIR/*.js 2>/dev/null | head -n 2" \
+	# The chunk holding a gate: the Visionary one (2026-10 on), else the old premium one.
+	chunk=$(in_image_ro "grep -lE '\\.LIFETIME&&null!=[^&]+\\.premiumLifetimeSequence' $ASSET_DIR/*.js 2>/dev/null | head -n 2" \
 		| tr -d '\r' | sed 's|.*/||')
-	[ -n "$chunk" ] || die "no chunk in $ASSET_DIR mentions plutonium.svg - did the bundle layout change?"
+	if [ -z "$chunk" ]; then
+		chunk=$(in_image_ro "grep -lE '\\?void 0:[^?]+\\.premiumType\\)&&' $ASSET_DIR/*.js 2>/dev/null | head -n 2" \
+			| tr -d '\r' | sed 's|.*/||')
+	fi
+	[ -n "$chunk" ] || die "no chunk in $ASSET_DIR has a self-hosted badge gate - did the bundle layout change?"
 	[ "$(printf '%s\n' "$chunk" | wc -l)" -eq 1 ] \
-		|| die "more than one chunk mentions plutonium.svg - patch them by hand: $chunk"
+		|| die "more than one chunk has a badge gate - patch them by hand: $chunk"
 	echo "  $chunk"
 
 	work="$PATCH_DIR.new"
@@ -200,7 +241,7 @@ cmd_apply() {
 	in_image "$work" "cp $ASSET_DIR/$chunk $STATIC/index.html /out/"
 	write_patch_program "$work"
 
-	echo "Removing the gate and recompressing (brotli q11 on a few MB takes a moment)."
+	echo "Removing the gates and recompressing (brotli q11 on a few MB takes a moment)."
 	resolve_node
 	run_node "$work" patch.js || die 'the patch step failed - nothing was changed'
 	name=$(cat "$work/patched.name")
@@ -218,7 +259,7 @@ cmd_apply() {
 $MARKER
 #
 # Serves a patched copy of the app bundle chunk that renders profile badges, so
-# the Plutonium badge appears on this self-hosted instance, plus an index.html
+# the Visionary badge appears on this self-hosted instance, plus an index.html
 # repointed at it. The stock chunk is left in place and simply stops being loaded.
 # See ops/badge-patch.sh for why, and re-run it after every \`fluxer update\`:
 # chunk names are release-specific.
@@ -310,7 +351,7 @@ verify() {
 		|| die "https://$domain$path is not serving the patched bytes"
 
 	echo
-	echo "Badge patch applied and live at $path. A normal reload picks it up."
+	echo "Visionary badge patch applied and live at $path. A normal reload picks it up."
 }
 
 case "${1:-apply}" in

@@ -46,7 +46,7 @@ _fluxer() {
 			changelog) words='--all' ;;
 			prune) words='--apply --keep' ;;
 			restore) words=$(_fluxer_backups) ;;
-			premium) words='--subscriber --off --list' ;;
+			premium) words='--duration --subscriber --off --list --repair' ;;
 			badge-patch) words='--revert' ;;
 			cf-ips) words='--apply --quiet --yes' ;;
 			firewall-fix) words='--apply --revert --installed --test --yes' ;;

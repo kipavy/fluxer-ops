@@ -1,11 +1,14 @@
 #!/bin/sh
 # gifts.sh - Plutonium gift codes on a self-hosted instance: mint, list, revoke, redeem.
 #
-#   gifts.sh create [--duration 1m] [--count N]   mint codes (Nd, Nw, Nm or Ny)
+#   gifts.sh create [--duration 1m] [--count N]   mint codes (Nd, Nw, Nm, Ny or lifetime)
 #   gifts.sh list [--unredeemed | --redeemed | --revoked]
 #   gifts.sh show <code>
 #   gifts.sh revoke <code>                        only while unredeemed
+#   gifts.sh rm <code>... [--force]               delete codes outright
 #   gifts.sh redeem <code> <user>                 apply one to an account
+#   gifts.sh setup-lifetime [--community C] [--role R]
+#                                                 make lifetime links redeemable in the app
 #
 # Upstream has gift codes, but a self-hosted instance cannot mint them:
 # POST /admin/gift-codes throws FeatureNotAvailableSelfHostedError when
@@ -42,12 +45,20 @@
 #           The api does the two writes one after the other and undoes the first if the
 #           second fails; here they are one transaction.
 #
+# Lifetime (Visionary) gifts are duration_quantity 0, the way upstream's Stripe
+# checkout mints them. Redeemed in the app they go through setPremiumLifetime, which
+# reserves a visionary_slots number and joins the account to the instance's
+# Visionaries community, giving it the Visionary role: FLUXER_VISIONARIES_GUILD_ID and
+# FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID. That is one community for the whole
+# instance, whichever community the link is posted in. Without it the api refuses the
+# redemption and rolls the code back, so 'create' will not mint a lifetime code until
+# 'setup-lifetime' has pointed both at a community and role that exist and the api runs
+# with them. A missing role alone would not fail a redemption (the api only logs it),
+# but it writes the dangling role id into the member, so it is required too.
+# Redeemed here, a lifetime code is premium.sh's lifetime grant: same visionary_slots
+# numbering, no community join.
+#
 # Not done, deliberately:
-#   - lifetime (Visionary) gifts. Upstream mints them only from a Stripe checkout, and
-#     redeeming one (duration_quantity 0) goes through setPremiumLifetime, which
-#     reserves a visionary slot and then throws unless FLUXER_VISIONARIES_GUILD_ID and
-#     FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID are set. 'fluxer premium <user>' is
-#     the lifetime path.
 #   - a note or label. The row has no such field and the api would never read one.
 #   - redeeming onto an open-ended grant from 'fluxer premium --subscriber' (type 1, no
 #     end date). The api would accept it, but it would give that grant an end date:
@@ -64,7 +75,6 @@ set -eu
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 need_instance
 PG_CONTAINER=${PG_CONTAINER:-}
-OVERRIDE="$FLUXER_DIR/docker-compose.override.yml"
 
 # GiftCodeConstants.ts and AdminCodeGenerationService.ts.
 CODE_LENGTH=32
@@ -102,25 +112,34 @@ run_sql() {
 
 usage() {
 	cat <<'USAGE'
-usage: gifts.sh create [--duration 1m] [--count N]
+usage: gifts.sh create [--duration 1m] [--count N] [--quiet]
        gifts.sh list [--unredeemed | --redeemed | --revoked]
        gifts.sh show <code>
        gifts.sh revoke <code>
+       gifts.sh rm <code>... [--force]
        gifts.sh redeem <code> <user>
+       gifts.sh setup-lifetime [--community <name|id>] [--role <name|id>]
 
-  create      mint N codes (default 1, at most 100), each worth --duration of
-              Plutonium: Nd, Nw, Nm or Ny, N from 1 to 3650 (default 1m)
-  list        every code, newest first, or only the ones in one state
-  show        one code in detail
-  revoke      make an unredeemed code unusable
-  redeem      apply a code to an account, as the app would have
+  create          mint N codes (default 1, at most 100), each worth --duration of
+                  Plutonium: Nd, Nw, Nm or Ny, N from 1 to 3650 (default 1m), or
+                  lifetime (Visionary). --quiet prints only the codes.
+  list            every code, newest first, or only the ones in one state
+  show            one code in detail
+  revoke          make an unredeemed code unusable, keeping it in the list
+  rm              delete codes and their index rows, as if never minted. A redeemed
+                  code needs --force: its premium stays, only the record goes.
+  redeem          apply a code to an account, as the app would have
+  setup-lifetime  point the instance's Visionaries community and role at a community
+                  and a role that exist, so lifetime links redeem in the app. With one
+                  community it is picked; the role defaults to one named "Visionary".
+                  Create that role in the app first (no permissions needed).
 
   <code> is the 32-character code, or a link ending in it.
   <user> is a username, or username#tag when several accounts share the name.
 
 create prints a https://<domain>/gift/<code> link per code: send it in a chat and
-whoever opens it first can redeem it in the app. Lifetime gifts are not
-supported: use 'fluxer premium <user>' for Visionary.
+whoever opens it first can redeem it in the app. To give premium straight to an
+account instead, use 'fluxer premium <user> [--duration D]'.
 USAGE
 }
 
@@ -172,22 +191,29 @@ SQL
 }
 
 cmd_create() {
-	duration=$1 count=$2
+	duration=$1 count=$2 quiet=$3
 	case "$duration" in
-		lifetime | visionary) die "lifetime gifts are not supported; 'fluxer premium <user>' grants Visionary" ;;
-		'' | *[!0-9dwmy]* | [dwmy]* | *[dwmy]*[0-9dwmy] | *[0-9]) die "not a duration: '$duration' (Nd, Nw, Nm or Ny)" ;;
+		lifetime | visionary)
+			lifetime_ready || exit 1
+			unit=months qty=0
+			;;
+		*)
+			case "$duration" in
+				'' | *[!0-9dwmy]* | [dwmy]* | *[dwmy]*[0-9dwmy] | *[0-9]) die "not a duration: '$duration' (Nd, Nw, Nm, Ny or lifetime)" ;;
+			esac
+			qty=${duration%?}
+			case "$duration" in
+				*d) unit=days ;;
+				*w) unit=weeks ;;
+				*m) unit=months ;;
+				*y) unit=years ;;
+			esac
+			# Strip leading zeros so the shell does not read the number as octal.
+			qty=$(printf '%s' "$qty" | sed 's/^0*//')
+			[ -n "$qty" ] && [ ${#qty} -le 4 ] && [ "$qty" -ge 1 ] && [ "$qty" -le "$MAX_QUANTITY" ] \
+				|| die "duration must be 1 to $MAX_QUANTITY $unit, or lifetime"
+			;;
 	esac
-	qty=${duration%?}
-	case "$duration" in
-		*d) unit=days ;;
-		*w) unit=weeks ;;
-		*m) unit=months ;;
-		*y) unit=years ;;
-	esac
-	# Strip leading zeros so the shell does not read the number as octal.
-	qty=$(printf '%s' "$qty" | sed 's/^0*//')
-	[ -n "$qty" ] && [ ${#qty} -le 4 ] && [ "$qty" -ge 1 ] && [ "$qty" -le "$MAX_QUANTITY" ] \
-		|| die "duration must be 1 to $MAX_QUANTITY $unit"
 	case "$count" in
 		'' | *[!0-9]*) die "not a count: '$count'" ;;
 	esac
@@ -196,9 +222,10 @@ cmd_create() {
 		|| die "count must be 1 to $MAX_COUNT"
 
 	# mapGiftCodeDurationToMonths: months and years also carry duration_months,
-	# days and weeks store null there.
+	# days and weeks store null there. A lifetime code is months/0 with null, as the
+	# Stripe checkout writes it.
 	case "$unit" in
-		months) months=$qty ;;
+		months) if [ "$qty" -eq 0 ]; then months=null; else months=$qty; fi ;;
 		years) months=$((qty * 12)) ;;
 		*) months=null ;;
 	esac
@@ -276,14 +303,24 @@ SQL
 	fi
 	[ "$(printf '%s' "$out" | tr -d '\r')" = "$count $count" ] || die "unexpected result '$out'; check 'gifts.sh list'"
 
-	label="$qty ${unit%s}"
-	[ "$qty" -eq 1 ] || label="$qty $unit"
+	if [ "$quiet" -eq 1 ]; then
+		for c in $codes; do printf '%s\n' "$c"; done
+		return 0
+	fi
+
+	if [ "$qty" -eq 0 ]; then
+		label='lifetime (Visionary)'
+	else
+		label="$qty ${unit%s}"
+		[ "$qty" -eq 1 ] || label="$qty $unit"
+	fi
 	if [ "$count" -eq 1 ]; then
 		printf 'Created 1 gift code: %s of Plutonium.\n\n' "$label"
 	else
 		printf 'Created %s gift codes: %s of Plutonium each.\n\n' "$count" "$label"
 	fi
-	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1 | tr -d '\r"' | sed "s/'//g")
+	domain=$(env_value FLUXER_DOMAIN)
+	domain=${domain#*://}
 	if [ -n "$domain" ]; then
 		for c in $codes; do printf '  https://%s/gift/%s\n' "${domain%/}" "$c"; done
 		cat <<'EOF'
@@ -412,6 +449,53 @@ SQL
 	echo "Revoked $code. It can no longer be redeemed."
 }
 
+# Delete codes and every index row naming them (gift_codes_by_creator, _by_redeemer,
+# _by_payment_intent ...). The api treats a missing code exactly like an unknown one.
+cmd_rm() {
+	force=$1
+	shift
+	codes=''
+	for a in "$@"; do codes="$codes $(parse_code "$a")"; done
+	out=$(run_sql -At -v codes="$codes" -v force="$force" <<'SQL'
+\set VERBOSITY terse
+begin;
+select set_config('fluxer_gifts.codes', :'codes', true) is null as unused1,
+       set_config('fluxer_gifts.force', :'force', true) is null as unused2 \gset
+do $$
+declare
+	c text;
+	g jsonb;
+begin
+	foreach c in array string_to_array(btrim(current_setting('fluxer_gifts.codes')), ' ') loop
+		continue when c = '';
+		select row_data into g from fluxer_kv
+		where table_name = 'gift_codes' and row_key = '"' || c || '"'
+		for update;
+		if g is null then
+			raise exception 'no gift code ''%''; nothing was deleted', c;
+		end if;
+		if coalesce(jsonb_typeof(g->'redeemed_by_user_id'), 'null') <> 'null'
+		   and current_setting('fluxer_gifts.force') <> '1' then
+			raise exception 'gift code ''%'' was redeemed; deleting it only erases the record (the premium stays). Add --force to do it anyway. Nothing was deleted', c;
+		end if;
+	end loop;
+end
+$$;
+with gone as (
+	delete from fluxer_kv
+	where (table_name = 'gift_codes' and row_key = any (
+	         select '"' || x || '"' from unnest(string_to_array(btrim(:'codes'), ' ')) x where x <> ''))
+	   or (table_name like 'gift\_codes\_by\_%' and row_data->>'code' = any (string_to_array(btrim(:'codes'), ' ')))
+	returning table_name
+)
+select count(*) filter (where table_name = 'gift_codes') || ' ' || count(*) from gone;
+commit;
+SQL
+)
+	set -- $out
+	echo "Deleted $1 gift code(s) and $(($2 - $1)) index row(s)."
+}
+
 premium_state() {
 	run_sql -At -F ' ' -v id="$1" <<'SQL'
 select coalesce(row_data->>'premium_type', '0'),
@@ -423,8 +507,21 @@ where table_name = 'users' and row_key = '{"__fluxer_type":"bigint","value":"' |
 SQL
 }
 
-badge_patch_applied() {
-	[ -f "$OVERRIDE" ] && head -n 1 "$OVERRIDE" | grep -q 'badge-patch.sh'
+# Undo GiftCodeRepository.redeemGiftCode, as StripeGiftService does when the grant
+# after it fails.
+unredeem_code() {
+	run_sql -v code="$1" -v id="$2" <<'SQL' > /dev/null
+\set VERBOSITY terse
+begin;
+update fluxer_kv
+set row_data = row_data || jsonb_build_object('redeemed_by_user_id', null, 'redeemed_at', null),
+    updated_at = now()
+where table_name = 'gift_codes' and row_key = '"' || :'code' || '"';
+delete from fluxer_kv
+where table_name = 'gift_codes_by_redeemer'
+  and row_key = '{"__fluxer_type":"bigint","value":"' || :'id' || '"}' || chr(31) || '"' || :'code' || '"';
+commit;
+SQL
 }
 
 cmd_redeem() {
@@ -432,18 +529,28 @@ cmd_redeem() {
 	user=$2
 	id=$(resolve_user "$user")
 	before=$(premium_state "$id")
+	lifetime=$(run_sql -At -v code="$code" <<'SQL'
+select coalesce((row_data->>'duration_quantity')::int, (row_data->>'duration_months')::int) = 0
+from fluxer_kv where table_name = 'gift_codes' and row_key = '"' || :'code' || '"';
+SQL
+)
 
-	run_sql -v code="$code" -v id="$id" <<'SQL'
+	# GIFTS_DIRECT=1 is premium.sh --duration: an admin giving premium, not an account
+	# buying it, so the purchase-only refusals (unclaimed, unverified email,
+	# PURCHASE_DISABLED) do not apply. Bots and lifetime accounts are refused either way.
+	run_sql -v code="$code" -v id="$id" -v direct="${GIFTS_DIRECT:-0}" <<'SQL'
 \set VERBOSITY terse
 begin;
 select set_config('fluxer_gifts.code', :'code', true) is null as unused1,
-       set_config('fluxer_gifts.user_id', :'id', true) is null as unused2 \gset
+       set_config('fluxer_gifts.user_id', :'id', true) is null as unused2,
+       set_config('fluxer_gifts.direct', :'direct', true) is null as unused3 \gset
 do $$
 declare
 	v_code text := current_setting('fluxer_gifts.code');
 	v_uid text := current_setting('fluxer_gifts.user_id');
 	v_ukey text := '{"__fluxer_type":"bigint","value":"' || current_setting('fluxer_gifts.user_id') || '"}';
 	v_now timestamptz := date_trunc('milliseconds', now());
+	v_direct boolean := current_setting('fluxer_gifts.direct') = '1';
 	g jsonb;
 	u jsonb;
 	d_type text;
@@ -492,9 +599,6 @@ begin
 	if d_type not in ('days', 'weeks', 'months', 'years') or d_qty < 0 then
 		raise exception 'gift code ''%'' has an invalid duration (% %)', v_code, d_qty, d_type;
 	end if;
-	if d_qty = 0 then
-		raise exception 'gift code ''%'' is a lifetime gift; redeeming one needs a Visionary slot and guild this instance does not have', v_code;
-	end if;
 
 	select row_data into u from fluxer_kv
 	where table_name = 'users' and row_key = v_ukey and (expires_at is null or expires_at > now())
@@ -520,16 +624,16 @@ begin
 	      | (1::bigint << 54) | (1::bigint << 55) | (1::bigint << 56) | (1::bigint << 58))) <> 0 then
 		raise exception 'this account still carries legacy flag bits the api migrates on write; redeem after it has been edited in the admin panel';
 	end if;
-	-- StripeCheckoutService.validateUserCanPurchase.
-	if u->>'password_hash' is null
+	-- StripeCheckoutService.validateUserCanPurchase; not for a direct grant.
+	if not v_direct and u->>'password_hash' is null
 	   and not coalesce((case jsonb_typeof(u->'traits') when 'object' then u->'traits'->'value'
 	                          when 'array' then u->'traits' end) ? 'sso', false) then
 		raise exception 'this is an unclaimed account (no password); the api refuses purchases and gifts for those';
 	end if;
-	if not coalesce((u->>'email_verified')::boolean, false) then
+	if not v_direct and not coalesce((u->>'email_verified')::boolean, false) then
 		raise exception 'this account''s email is not verified; the api refuses gifts until it is (''fluxer users verify-email'')';
 	end if;
-	if (pflags & 64) <> 0 then
+	if not v_direct and (pflags & 64) <> 0 then
 		raise exception 'this account has PURCHASE_DISABLED set';
 	end if;
 	-- CannotRedeemPlutoniumWithVisionaryError.
@@ -541,7 +645,7 @@ begin
 	                then (u->'premium_until'->>'value')::timestamptz end;
 	p_gift := case when jsonb_typeof(u->'premium_gift_extension_ends_at') = 'object'
 	               then (u->'premium_gift_extension_ends_at'->>'value')::timestamptz end;
-	if ptype = 1 and p_until is null and p_gift is null then
+	if d_qty > 0 and ptype = 1 and p_until is null and p_gift is null then
 		raise exception 'this account has open-ended Plutonium (''fluxer premium --subscriber''); a gift would give it an end date, after which the api strips it. Nothing changed';
 	end if;
 
@@ -574,6 +678,11 @@ begin
 	set partition_key = excluded.partition_key, row_data = kv.row_data || excluded.row_data,
 	    expires_at = excluded.expires_at, updated_at = now();
 
+	-- A lifetime code stops here: premium.sh grants it next, as setPremiumLifetime.
+	if d_qty = 0 then
+		return;
+	end if;
+
 	-- extendPremiumByGift's patch, through patchAccount (a null only clears a set field)
 	-- and patchUser (the key column and version + 1 ride along).
 	patch := jsonb_build_object('user_id', u->'user_id',
@@ -597,6 +706,15 @@ $$;
 commit;
 SQL
 
+	if [ "$lifetime" = t ]; then
+		if ! "$OPS/premium.sh" "$user" --lifetime; then
+			unredeem_code "$code" "$id"
+			die "the lifetime grant failed, so $code was put back unredeemed"
+		fi
+		echo "$user: redeemed lifetime code $code."
+		return 0
+	fi
+
 	after=$(premium_state "$id")
 	# shellcheck disable=SC2086 # split "type since ends version" into $1..$4
 	set -- $before
@@ -609,14 +727,131 @@ SQL
 	printf '  gift ends     %s -> %s\n' "$b_ends" "$3"
 	printf '  version       %s -> %s\n' "$b_version" "$4"
 	echo
-	if badge_patch_applied; then
-		echo "Badge patch: applied. Open clients show the badge after a reload; other"
-		echo "people's view within ~30 s (users service cache)."
-	else
-		echo "Badge patch: not applied, so the badge will not render on this instance."
-		echo "  'fluxer badge-patch' applies it (it recreates app-proxy)."
+	echo "Open clients show the badge after a reload; other people's view within ~30 s"
+	echo "(users service cache). Premium ends on its own when the gift runs out."
+}
+
+# One value from .env, quotes and CR stripped. Empty when unset.
+env_value() {
+	sed -n "s/^$1=//p" "$FLUXER_DIR/.env" 2> /dev/null | tail -n 1 | tr -d '\r"' | sed "s/'//g"
+}
+
+# Services whose compose config passes $1 to the container, one per line.
+services_with_env() {
+	(cd "$FLUXER_DIR" && docker compose config --format json 2> /dev/null) | python3 -c '
+import json, sys
+key = sys.argv[1]
+for name, svc in sorted(json.load(sys.stdin).get("services", {}).items()):
+    env = svc.get("environment") or {}
+    if (key in env) if isinstance(env, dict) else any(e.split("=", 1)[0] == key for e in env):
+        print(name)
+' "$1"
+}
+
+# Lifetime links redeem in the app only when the api has a Visionaries community and
+# role (StripePremiumService.addToVisionariesGuild) that exist. Says what is missing.
+lifetime_ready() {
+	gid=$(env_value FLUXER_VISIONARIES_GUILD_ID)
+	rid=$(env_value FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID)
+	if [ -z "$gid" ] || [ -z "$rid" ]; then
+		echo "gifts: lifetime links need a Visionaries community and role on this instance;" >&2
+		echo "  run 'fluxer gifts setup-lifetime' first, or grant lifetime directly with" >&2
+		echo "  'fluxer premium <user>'." >&2
+		return 1
 	fi
-	echo "Premium ends on its own when the gift runs out; nothing needs to run then."
+	found=$(run_sql -At -v gid="$gid" -v rid="$rid" <<'SQL'
+select (select count(*) from fluxer_kv
+        where table_name = 'guilds' and (expires_at is null or expires_at > now())
+          and row_data->'guild_id'->>'value' = :'gid')
+       || ' ' ||
+       (select count(*) from fluxer_kv
+        where table_name = 'guild_roles' and (expires_at is null or expires_at > now())
+          and row_data->'guild_id'->>'value' = :'gid' and row_data->'role_id'->>'value' = :'rid');
+SQL
+)
+	case "$found" in
+		'0 '*) echo "gifts: the Visionaries community $gid in .env no longer exists; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
+		*' 0') echo "gifts: the Visionary role $rid in .env is not in community $gid any more; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
+	esac
+	api=$(cd "$FLUXER_DIR" && docker compose ps -q api 2> /dev/null) || api=''
+	if [ -n "$api" ]; then
+		live=$(docker exec "$api" printenv FLUXER_VISIONARIES_GUILD_ID 2> /dev/null | tr -d '\r') || live=''
+		if [ "$live" != "$gid" ]; then
+			echo "gifts: .env names a Visionaries community the running api does not have yet;" >&2
+			echo "  run 'fluxer gifts setup-lifetime' to apply it" >&2
+			return 1
+		fi
+	fi
+	return 0
+}
+
+cmd_setup_lifetime() {
+	community=$1 role=${2:-Visionary}
+	case "$community$role" in
+		*"'"* | *'"'* | *"\\"*) die "names cannot contain quotes or backslashes" ;;
+	esac
+
+	guilds=$(run_sql -At -F '|' <<'SQL'
+select row_data->'guild_id'->>'value', row_data->>'name'
+from fluxer_kv
+where table_name = 'guilds' and (expires_at is null or expires_at > now())
+order by 2, 1;
+SQL
+)
+	[ -n "$guilds" ] || die "this instance has no community yet; create one in the app first"
+	if [ -z "$community" ]; then
+		if [ "$(printf '%s\n' "$guilds" | grep -c .)" -ne 1 ]; then
+			echo "gifts: this instance has several communities; say which one with --community:" >&2
+			printf '%s\n' "$guilds" | sed 's/^\([^|]*\)|\(.*\)$/  \2  (\1)/' >&2
+			exit 1
+		fi
+		match=$guilds
+	else
+		match=$(printf '%s\n' "$guilds" | awk -F '|' -v c="$community" '$1 == c || tolower($2) == tolower(c)')
+		[ -n "$match" ] || die "no community '$community' (name or id)"
+		[ "$(printf '%s\n' "$match" | grep -c .)" -eq 1 ] || die "several communities are named '$community'; give its id"
+	fi
+	gid=${match%%|*} gname=${match#*|}
+
+	roles=$(run_sql -At -F '|' -v gid="$gid" <<'SQL'
+select row_data->'role_id'->>'value', row_data->>'name',
+       coalesce(row_data->'permissions'->>'value', row_data->>'permissions', '0')
+from fluxer_kv
+where table_name = 'guild_roles' and (expires_at is null or expires_at > now())
+  and row_data->'guild_id'->>'value' = :'gid'
+order by 2, 1;
+SQL
+)
+	rmatch=$(printf '%s\n' "$roles" | awk -F '|' -v r="$role" '$1 == r || tolower($2) == tolower(r)')
+	if [ -z "$rmatch" ]; then
+		echo "gifts: no role '$role' in $gname. Create one in the app (community settings," >&2
+		echo "  Roles): any name, no permissions, then run this again, adding --role <name>" >&2
+		echo "  if it is not called 'Visionary'. Lifetime redeemers get that role." >&2
+		exit 1
+	fi
+	[ "$(printf '%s\n' "$rmatch" | grep -c .)" -eq 1 ] || die "several roles in $gname are named '$role'; give its id"
+	rid=${rmatch%%|*} rest=${rmatch#*|}
+	rname=${rest%|*} perms=${rest##*|}
+	[ "$rid" != "$gid" ] || die "@everyone cannot be the Visionary role: the api would write it into each member's own roles"
+	case "$perms" in '' | *[!0-9]*) perms=0 ;; esac
+	# Permissions.ADMINISTRATOR is bit 3: every redeemer would become an admin.
+	[ $((perms & 8)) -eq 0 ] || die "role '$rname' has Administrator; every lifetime redeemer would get it. Pick a role without permissions"
+	[ "$perms" -eq 0 ] || echo "note: role '$rname' grants permissions ($perms); every lifetime redeemer gets them"
+
+	# Register existing Visionary numbers before the api can allocate any.
+	"$OPS/premium.sh" --repair
+	"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_ID "$gid" > /dev/null
+	"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID "$rid" > /dev/null
+
+	svcs=$(services_with_env FLUXER_VISIONARIES_GUILD_ID | tr '\n' ' ')
+	[ -n "$svcs" ] || die "no service in the compose file passes FLUXER_VISIONARIES_GUILD_ID; .env is set, but nothing reads it"
+	echo "Recreating $svcs so they pick it up."
+	# shellcheck disable=SC2086 # one word per service
+	(cd "$FLUXER_DIR" && docker compose up -d $svcs 2>&1) | grep -v 'level=warning' || true
+	lifetime_ready || die "set in .env, but not live yet; check 'fluxer ps'"
+	echo
+	echo "Lifetime links are ready. Redeemers join $gname and get the '$rname' role."
+	echo "  fluxer gifts create --duration lifetime"
 }
 
 action=${1:-}
@@ -624,9 +859,10 @@ action=${1:-}
 
 case "$action" in
 	create)
-		duration=1m count=1
+		duration=1m count=1 quiet=0
 		while [ $# -gt 0 ]; do
 			case "$1" in
+				--quiet | -q) quiet=1 ;;
 				--duration) [ $# -ge 2 ] || die '--duration needs a value'; duration=$2; shift ;;
 				--duration=*) duration=${1#*=} ;;
 				--count) [ $# -ge 2 ] || die '--count needs a value'; count=$2; shift ;;
@@ -636,7 +872,21 @@ case "$action" in
 			esac
 			shift
 		done
-		cmd_create "$duration" "$count"
+		cmd_create "$duration" "$count" "$quiet"
+		;;
+	setup-lifetime)
+		community='' role=''
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--community) [ $# -ge 2 ] || die '--community needs a value'; community=$2; shift ;;
+				--community=*) community=${1#*=} ;;
+				--role) [ $# -ge 2 ] || die '--role needs a value'; role=$2; shift ;;
+				--role=*) role=${1#*=} ;;
+				*) die "unknown option: $1" ;;
+			esac
+			shift
+		done
+		cmd_setup_lifetime "$community" "$role"
 		;;
 	list)
 		filter=all
@@ -657,6 +907,23 @@ case "$action" in
 	revoke)
 		[ $# -eq 1 ] || { usage >&2; exit 2; }
 		cmd_revoke "$1"
+		;;
+	rm | delete)
+		force=0 n=0
+		for a in "$@"; do
+			case "$a" in
+				--force | -f) force=1 ;;
+				-*) die "unknown option: $a" ;;
+				*) n=$((n + 1)) ;;
+			esac
+		done
+		[ "$n" -ge 1 ] || { usage >&2; exit 2; }
+		args=''
+		for a in "$@"; do
+			case "$a" in -*) ;; *) args="$args $a" ;; esac
+		done
+		# shellcheck disable=SC2086 # codes are validated by parse_code; no spaces inside
+		cmd_rm "$force" $args
 		;;
 	redeem)
 		[ $# -eq 2 ] || { usage >&2; exit 2; }

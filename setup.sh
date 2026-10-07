@@ -426,7 +426,8 @@ cron_write() {
 # the rest runs as the deploying user.
 JOBS="watchdog.sh|*/10 * * * *|root
 backup.sh|0 3 * * *|user
-disk.sh --record|30 3 * * *|user"
+disk.sh --record|30 3 * * *|user
+premium.sh --repair|15 4 * * *|user"
 
 link_step() { # <name> <link> <target>
 	if [ "$(readlink "$2" 2> /dev/null || true)" = "$3" ]; then

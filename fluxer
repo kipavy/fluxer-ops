@@ -37,12 +37,14 @@ Updates
 Accounts
   fluxer users list [--recent N] | show <user> | stats [--messages]
   fluxer users staff <user> [--off] | verify-email <user>
-  fluxer premium <user>      Grant Plutonium + the Visionary badge, patch included
-             [--subscriber]  "subscriber since" badge instead of Visionary
+  fluxer premium <user>      Grant lifetime Plutonium + the Visionary badge, patch included
+             [--duration D]  For a set length instead: Nd, Nw, Nm or Ny
+             [--subscriber]  Open-ended, "subscriber since" badge instead of Visionary
              [--off]         Revoke it
-             [--list]        Who has premium
-  fluxer gifts ...           Plutonium gift codes (fluxer gifts --help)
-  fluxer badge-patch         Re-apply just the client-side badge patch
+             [--list]        Who has premium, and until when
+             [--repair]      Drop leftover end dates from lifetime accounts (daily cron)
+  fluxer gifts ...           Plutonium gift codes and links, lifetime included (fluxer gifts --help)
+  fluxer badge-patch         Re-apply just the client-side Visionary badge patch
              [--revert]      Drop it and go back to the stock bundle
 
 Backups

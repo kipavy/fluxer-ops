@@ -104,15 +104,15 @@ Three commands are worth knowing before you need them:
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, and brings the stack up if services are missing. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
-| `premium.sh` | you | Grants or revokes Plutonium on an account and applies the badge patch if needed. One command, start to finish. |
-| `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Plutonium badge renders on a self-hosted instance. `--revert` undoes it. |
+| `premium.sh` | you; user cron, 04:15 daily (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
+| `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
 | `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, rollback images. |
 | `firewall-fix.sh` | you, once | Diagnoses Docker vs firewalld on this host; `--apply` installs the systemd drop-in that fixes it. |
 | `cf-ips.sh` | you, `doctor.sh` | Compares `FLUXER_EDGE_TRUSTED_PROXIES` with Cloudflare's published ranges; `--apply` rewrites that line. |
 | `users.sh` | you | List and inspect accounts, set STAFF, mark an email verified, instance counts. |
-| `gifts.sh` | you | Plutonium gift codes. |
+| `gifts.sh` | you | Plutonium gift codes and links, lifetime included. |
 | `debug.sh` | you | psql / valkey-cli / shell shortcuts, grouped error scan, per-service memory, voice reachability. |
 | `prune.sh` | you | Frees image space while keeping every image a container, the compose file or the newest 2 installer records needs. Lists by default. |
 | `disk.sh` | you; user cron `--record` daily | Filesystem, volumes, backups, images; keeps `../fluxer-backups/disk-history.tsv` for growth and days-until-full. |
@@ -281,39 +281,48 @@ images on this host are listed and never touched.
 
 Database schema migrations are not reverted by a rollback.
 
-## The Plutonium badge patch
+## The Visionary badge patch
 
 On a fresh instance, from nothing to a badge:
 
 ```sh
-fluxer premium <username>   # sets the account up and applies the patch
+fluxer premium <username>   # lifetime: sets the account up and applies the patch
 ```
 
-then reload the client. The rest of this section is why that second half is needed
-at all, and what it does.
+then reload the client. The rest of this section is why the patch is needed at all,
+and what it does.
 
-The premium badge is hidden on self-hosted instances by the **client**, not by the
-API. `UserProfileBadges.tsx` reads:
+The **Plutonium badge** needs no patch since the 2026-10 releases: the client shows
+it whenever the instance reports `premium_enabled`, i.e. the admin panel's premium
+mode is `mirror`. In `everyone` mode (the self-hosted default) the client hides
+premium altogether, badge included; `fluxer premium` warns when that is the case.
+
+What the client still hides on a self-hosted instance are the **Visionary** extras:
+the "Visionary since" tooltip and the "Visionary ID #N" badge. `UserProfileBadges.tsx`:
 
 ```ts
-if (!selfHosted && profile?.premiumType && profile.premiumType !== UserPremiumTypes.NONE)
+if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME) { /* Visionary tooltip */ }
+...
+if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME && profile.premiumLifetimeSequence != null)
 ```
 
-so no amount of account state brings it back. Everything else is already in place:
-the API serves `premium_type` to profile viewers on any instance (it is stripped
-only for `BADGE_HIDDEN` or a restricted profile), and `/badges/plutonium.svg` ships
-in the `fluxer-static` image. The same gate hides the Partner and Bug Hunter
-badges; `STAFF` has no gate, which is why that one shows on a stock instance.
+so no amount of account state brings them back. Everything else is already in
+place: the API serves `premium_type`, `premium_since` and
+`premium_lifetime_sequence` to profile viewers on any instance (stripped only for
+`BADGE_HIDDEN` or a restricted profile). Earlier releases gated the whole premium
+badge the same way (`!selfHosted && profile?.premiumType && ...`); the patch still
+removes that gate when a bundle has it.
 
 There is no setting for it, and flipping `FLUXER_SELF_HOSTED` is not an option --
 it also drives the setup flow, registration and the Stripe paths. So
 `badge-patch.sh` edits the shipped bundle:
 
-1. Finds the one content-hashed chunk in the **app-proxy image** that names
-   `plutonium.svg`, and copies it out along with `index.html` (from the image,
-   never from the running container, so a re-run starts from pristine bytes).
-2. Deletes `!selfHosted &&` from that single condition, matching on the *shape* of
-   the minified expression rather than on a release's variable names.
+1. Finds the one content-hashed chunk in the **app-proxy image** that holds the
+   gates, and copies it out along with `index.html` (from the image, never from the
+   running container, so a re-run starts from pristine bytes).
+2. Deletes `!selfHosted` from each gate it finds (each at most once, at least one),
+   matching on the *shape* of the minified expression rather than on a release's
+   variable names.
 3. Publishes the result under a **new, content-derived name**
    (`<chunk>.<sha8>.js`, plus `.br` and `.gz` -- app-proxy serves whichever
    precompressed sibling the browser asks for) and rewrites `index.html` to point
@@ -377,14 +386,28 @@ like it did nothing.
 ### Granting it: `fluxer premium`
 
 ```sh
-fluxer premium <username>               # Visionary badge (lifetime)
-fluxer premium <username> --subscriber  # "subscriber since" badge instead
-fluxer premium <username> --off         # revoke
-fluxer premium --list                   # who has premium
+fluxer premium <user>                   # lifetime: Visionary badge and number
+fluxer premium <user> --duration 1m     # a set length: Nd, Nw, Nm or Ny; ends on its own
+fluxer premium <user> --subscriber      # open-ended, "subscriber since" badge
+fluxer premium <user> --off             # revoke
+fluxer premium --list                   # who has premium, and until when
+fluxer premium --repair                 # keep lifetime grants from being stripped (cron)
 ```
 
-That is the whole flow -- it applies the badge patch itself if it is not on yet, so
-a fresh instance needs one command and a page reload.
+`<user>` is a username, or `username#tag` when several accounts share the name.
+That is the whole flow -- a lifetime grant applies the badge patch itself if it is
+not on yet, so a fresh instance needs one command and a page reload.
+
+`--duration` is a gift code minted and redeemed in one go, so it follows the gift
+rules below exactly: it stacks after a running time-limited grant, and it is refused
+on an account with lifetime or open-ended premium.
+
+Lifetime numbers (the Visionary `#N`) come from the api's own `visionary_slots`
+table, allocated the way `setPremiumLifetime` does: the account's number if it has
+one, else its reserved slot, else the lowest free slot, else one past the highest.
+So a lifetime gift redeemed in the app and a grant made here never collide.
+Visionaries numbered before that table was kept in step are registered into it on
+the next grant.
 
 It writes the row directly, which is not laziness: the badge renders off
 `premium_type` (`1` subscription, `2` lifetime, plus `premium_lifetime_sequence`
@@ -399,7 +422,7 @@ What a grant sets:
 | Field | Value | Why |
 | --- | --- | --- |
 | `premium_type` | `2`, or `1` with `--subscriber` | what the badge renders from |
-| `premium_lifetime_sequence` | next free number, existing one kept | the Visionary `#N` |
+| `premium_lifetime_sequence` | from `visionary_slots` (above), existing one kept | the Visionary `#N` |
 | `premium_flags` | `ENABLED_OVERRIDE` on; `PERKS_DISABLED`, `BADGE_HIDDEN`, `BADGE_MASKED` off | the perks, and nothing left suppressing or downgrading the badge |
 | `premium_since` | now, if not already set | the "since" in the tooltip |
 | `premium_until`, `premium_gift_extension_ends_at` | **removed** | the server takes the later of the two as the end; with both absent it never expires to the server (`checkHasActivePaidPremium`) or the client (`isPremiumExpiredLocally`), so nothing strips it later -- including a redeemed gift's end date |
@@ -413,18 +436,30 @@ client reload is enough -- no restart. The `users` service does cache them for 3
 (`FLUXER_SVC_CACHE_TTL_MS`), so how *other people* see the account can lag that long.
 
 `--off` mirrors the api's own `PREMIUM_CLEAR_FIELDS` and deliberately leaves
-`premium_lifetime_sequence` alone: a Visionary ID is an identity, not an
-entitlement. It also leaves the badge patch in place, since other accounts may be
+`premium_lifetime_sequence` (and its slot) alone: a Visionary ID is an identity, not
+an entitlement. It also leaves the badge patch in place, since other accounts may be
 using it.
+
+`--repair` covers an upstream gap. Redeeming a lifetime gift **in the app**
+(`setPremiumLifetime`) clears `premium_until` but leaves
+`premium_gift_extension_ends_at`, so an account that still had a time-limited gift
+running keeps that end date. The api takes the later of the two as the end, and
+once it is more than `PREMIUM_GRACE_PERIOD_DAYS` (3) past, it strips premium on the
+next session start -- lifetime included. `--repair` drops every end date from
+lifetime accounts; `fluxer setup` installs it as a daily cron job, well inside the
+3 days, and it is silent when there is nothing to fix. Grants made by this CLI
+never leave one behind.
 
 ## Plutonium gift codes: `fluxer gifts`
 
 ```sh
-fluxer gifts create --duration 1m --count 5   # Nd, Nw, Nm, Ny; at most 100; prints links
+fluxer gifts create --duration 1m --count 5   # Nd, Nw, Nm, Ny or lifetime; at most 100; prints links
 fluxer gifts list [--unredeemed | --redeemed | --revoked]
 fluxer gifts show <code>
 fluxer gifts revoke <code>                    # only while unredeemed
+fluxer gifts rm <code>... [--force]           # delete outright; --force for redeemed ones
 fluxer gifts redeem <code> <user>             # user or user#tag
+fluxer gifts setup-lifetime [--community C] [--role R]   # once, for lifetime links
 ```
 
 Upstream has Plutonium gift codes, but **a self-hosted instance cannot mint
@@ -457,17 +492,43 @@ A gift sets an **end date**, unlike `fluxer premium`. When it passes, the api st
 premium on the user's next session or profile view, badge included; nothing has to
 run. That is why `redeem` also refuses an account holding open-ended premium from
 `fluxer premium --subscriber`: the gift would put an end date on a grant that had
-none. Lifetime gifts are not offered: upstream mints those only from a Stripe
-checkout, and redeeming one (`duration_quantity` 0) reserves a Visionary slot and
-then fails unless `FLUXER_VISIONARIES_GUILD_ID` and
-`FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID` are set. `fluxer premium <user>` is
-the lifetime path here.
+none.
+
+### Lifetime (Visionary) gift links
+
+```sh
+fluxer gifts setup-lifetime                    # once per instance
+fluxer gifts create --duration lifetime        # then as many as you like
+```
+
+A lifetime code is `duration_quantity` 0, as upstream's Stripe checkout mints them.
+Redeemed in the app it goes through `setPremiumLifetime`, which reserves a Visionary
+number and **joins the account to the instance's Visionaries community, with its
+Visionary role** -- `FLUXER_VISIONARIES_GUILD_ID` and
+`FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID`. That is one community for the whole
+instance, whichever community a link is posted in. Without it the api refuses the
+redemption and rolls the code back. A missing role alone would not fail it (the api
+only logs that), but it writes the dangling role id into the member, so the CLI
+requires both.
+
+`setup-lifetime` points them at a community and role that exist: with a single
+community it is picked, otherwise `--community <name|id>`; the role defaults to one
+named `Visionary` (`--role` for another). Create that role in the app first -- no
+permissions needed; `@everyone` and any role with Administrator are refused. It
+writes both keys with `env.sh` and recreates only the services that read them.
+
+`create --duration lifetime` checks the same three things before minting -- both
+keys set, the community and role still exist, and the running api has them -- so an
+instance that is not set up, or no longer is, never hands out a link that cannot be
+redeemed. `redeem` applies a lifetime code here without any of that: it is
+`fluxer premium <user>`'s lifetime grant, with no community join.
+
+An account with a time-limited gift still running can redeem a lifetime gift; see
+`fluxer premium --repair` above for the end date the app leaves behind.
 
 In the self-hosted default `premium_mode` of `everyone`, every account already has
-the perks, so a gift mostly means the badge -- which needs the badge patch; `redeem`
-says so if it is off rather than recreating app-proxy as a side effect.
-
-Tested against a synthetic database only; it has not yet run against this instance.
+the perks and the client hides premium badges altogether, so gifts are only worth
+handing out with premium mode `mirror` (admin panel, instance settings).
 
 ## Accounts from a shell: `fluxer users`
 
