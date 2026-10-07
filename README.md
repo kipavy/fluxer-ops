@@ -290,8 +290,10 @@ On a fresh instance, from nothing to a badge:
 fluxer premium <username>   # lifetime: sets the account up and applies the patch
 ```
 
-then reload the client. The rest of this section is why the patch is needed at all,
-and what it does.
+then reload the client. It changes the **web app** served by this instance; the
+desktop and mobile apps ship their own copy of the client and keep showing the
+Plutonium badge with "subscriber since". The rest of this section is why the patch
+is needed at all, and what it does.
 
 The **Plutonium badge** needs no patch since the 2026-10 releases: the client shows
 it whenever the instance reports `premium_enabled`, i.e. the admin panel's premium
@@ -328,6 +330,12 @@ it also drives the setup flow, registration and the Stripe paths. So
    (`<chunk>.<sha8>.js`, plus `.br` and `.gz` -- app-proxy serves whichever
    precompressed sibling the browser asks for) and rewrites `index.html` to point
    at it. The stock chunk stays in the image and simply stops being loaded.
+   Since the 2026-10 releases the chunk is **lazy-loaded**: `index.html` only
+   preloads it, and the module runtime fetches it by its stock name. So every file
+   that loads the chunk by name (the runtime) is repointed and republished the same
+   way, and `index.html` loads that copy instead. Patching the chunk alone serves the
+   patched file but runs the stock one -- the badge stays unchanged. A loader that
+   `index.html` does not load itself is refused rather than guessed at.
 4. Bind-mounts those files through `docker-compose.override.yml` (auto-loaded,
    because `.env` sets no `COMPOSE_FILE`), then proves app-proxy serves the patched
    bytes in all three encodings and that both the origin and public HTML reference

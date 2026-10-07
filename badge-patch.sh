@@ -40,6 +40,13 @@
 # correct. index.html is `no-cache` and never CDN-cached, so a new chunk name is
 # picked up on the next page load, everywhere, with nothing to purge.
 #
+# Since the 2026-10 releases the badge chunk is lazy-loaded: index.html only
+# preloads it, and the module runtime (itself a <script> in index.html) fetches it by
+# its stock name. So every file that loads the chunk by name gets the same treatment:
+# the reference repointed at the patched copy, published under its own new
+# content-derived name, and index.html repointed at that. A loader that index.html
+# does not load itself is refused rather than guessed at.
+#
 # Because the mounted index.html names a release-specific chunk, it must NOT stay
 # mounted across an update: the new image would be served an index.html pointing at
 # chunks it no longer has, breaking the app rather than just losing the badge.
@@ -198,18 +205,47 @@ const publish = (file, buf, quality) => {
 };
 publish(name, body, 11);
 
-// Repoint the HTML. app-proxy templates index.html on every request (it injects
-// __FLUXER_CONFIG__), so this file is a template, not a served artifact.
-const html = fs.readFileSync('index.html', 'utf8');
-if (!html.includes(`/assets/${chunk}`)) {
-	console.error(`patch: index.html does not reference /assets/${chunk}`);
+// Repoint whatever loads the chunk by name. The module runtime fetches it by its
+// stock name, so it gets the new name and is published under a new name of its
+// own; index.html then points at that. A loader must be loaded from index.html,
+// or the renaming would have to cascade further than this follows.
+let html = fs.readFileSync('index.html', 'utf8');
+const names = [name];
+const htmlNames = [];
+if (html.includes(`/assets/${chunk}`)) {
+	html = html.replaceAll(`/assets/${chunk}`, `/assets/${name}`);
+	htmlNames.push(name);
+}
+const loaders = fs.readFileSync('loaders.name', 'utf8').split('\n').map((l) => l.trim()).filter(Boolean);
+for (const loader of loaders) {
+	if (!html.includes(`/assets/${loader}`)) {
+		console.error(`patch: ${loader} loads the badge chunk, but index.html does not load ${loader}`);
+		process.exit(3);
+	}
+	const repointed = Buffer.from(
+		fs.readFileSync(loader, 'utf8').replaceAll(`assets/${chunk}`, `assets/${name}`),
+		'utf8',
+	);
+	const loaderSha8 = crypto.createHash('sha256').update(repointed).digest('hex').slice(0, 8);
+	const loaderName = `${loader.replace(/\.js$/, '')}.${loaderSha8}.js`;
+	publish(loaderName, repointed, 11);
+	html = html.replaceAll(`/assets/${loader}`, `/assets/${loaderName}`);
+	names.push(loaderName);
+	htmlNames.push(loaderName);
+}
+if (htmlNames.length === 0) {
+	console.error(`patch: nothing index.html loads reaches /assets/${chunk}`);
 	process.exit(3);
 }
-publish('index.html', Buffer.from(html.replaceAll(`/assets/${chunk}`, `/assets/${name}`), 'utf8'), 5);
+// app-proxy templates index.html on every request (it injects __FLUXER_CONFIG__),
+// so this file is a template, not a served artifact.
+publish('index.html', Buffer.from(html, 'utf8'), 5);
 
 fs.writeFileSync('patched.name', `${name}\n`);
+fs.writeFileSync('patched.names', `${names.join('\n')}\n`);
+fs.writeFileSync('html.names', `${htmlNames.join('\n')}\n`);
 console.log(`  removed: ${removed.join(', ')}`);
-console.log(`  published as ${name} (${body.length} bytes) and repointed index.html`);
+console.log(`  published ${names.join(', ')} (${body.length} bytes for the chunk) and repointed index.html`);
 NODE
 }
 
@@ -238,29 +274,51 @@ cmd_apply() {
 	rm -rf "$work"
 	mkdir -p "$work" "$PATCH_DIR"
 	printf '%s\n' "$chunk" > "$work/chunk.name"
-	in_image "$work" "cp $ASSET_DIR/$chunk $STATIC/index.html /out/"
+	# Files that load the chunk by name (the module runtime, since 2026-10).
+	loaders=$(in_image_ro "grep -lF 'assets/$chunk' $ASSET_DIR/*.js 2>/dev/null" \
+		| tr -d '\r' | sed 's|.*/||' | grep -vxF "$chunk" || true)
+	printf '%s\n' $loaders > "$work/loaders.name"
+	[ -z "$loaders" ] || echo "  loaded by $(printf '%s ' $loaders)"
+	srcs="$ASSET_DIR/$chunk"
+	for l in $loaders; do srcs="$srcs $ASSET_DIR/$l"; done
+	in_image "$work" "cp $srcs $STATIC/index.html /out/"
 	write_patch_program "$work"
 
 	echo "Removing the gates and recompressing (brotli q11 on a few MB takes a moment)."
 	resolve_node
 	run_node "$work" patch.js || die 'the patch step failed - nothing was changed'
 	name=$(cat "$work/patched.name")
+	names=$(cat "$work/patched.names")
 
 	# Copy in over whatever is already mounted; never delete a mounted file, or
 	# docker replaces the bind source with a root-owned directory on the next up.
-	for f in "$name" "$name.br" "$name.gz" index.html index.html.br index.html.gz; do
+	for n in $names; do
+		for f in "$n" "$n.br" "$n.gz"; do
+			cat "$work/$f" > "$PATCH_DIR/$f"
+		done
+	done
+	for f in index.html index.html.br index.html.gz patched.names html.names; do
 		cat "$work/$f" > "$PATCH_DIR/$f"
 	done
 	printf '%s\n' "$chunk" > "$PATCH_DIR/chunk.name"
 	printf '%s\n' "$name" > "$PATCH_DIR/patched.name"
 	rm -rf "$work"
 
+	mounts=''
+	for n in $names; do
+		for f in "$n" "$n.br" "$n.gz"; do
+			mounts="$mounts      - $PATCH_DIR/$f:$ASSET_DIR/$f:ro
+"
+		done
+	done
+
 	cat > "$OVERRIDE" <<YAML
 $MARKER
 #
 # Serves a patched copy of the app bundle chunk that renders profile badges, so
-# the Visionary badge appears on this self-hosted instance, plus an index.html
-# repointed at it. The stock chunk is left in place and simply stops being loaded.
+# the Visionary badge appears on this self-hosted instance, plus repointed copies of
+# whatever loads it (the module runtime) and an index.html repointed at those. The
+# stock files are left in place and simply stop being loaded.
 # See ops/badge-patch.sh for why, and re-run it after every \`fluxer update\`:
 # chunk names are release-specific.
 services:
@@ -269,10 +327,7 @@ services:
       # Absolute, not ./ops/patches/...: compose resolves relative bind sources
       # against the compose file's directory (\$FLUXER_DIR), which is only ./ops
       # when this checkout lives at \$FLUXER_DIR/ops. \$PATCH_DIR is always right.
-      - $PATCH_DIR/$name:$ASSET_DIR/$name:ro
-      - $PATCH_DIR/$name.br:$ASSET_DIR/$name.br:ro
-      - $PATCH_DIR/$name.gz:$ASSET_DIR/$name.gz:ro
-      - $PATCH_DIR/index.html:$STATIC/index.html:ro
+$mounts      - $PATCH_DIR/index.html:$STATIC/index.html:ro
       - $PATCH_DIR/index.html.br:$STATIC/index.html.br:ro
       - $PATCH_DIR/index.html.gz:$STATIC/index.html.gz:ro
 YAML
@@ -284,74 +339,85 @@ YAML
 	# drop now: the new override no longer names it, and the container is recreated.
 	for f in "$PATCH_DIR"/*; do
 		[ -e "$f" ] || continue
-		case "$(basename "$f")" in
-			"$name" | "$name.br" | "$name.gz") ;;
-			index.html | index.html.br | index.html.gz | chunk.name | patched.name) ;;
+		b=$(basename "$f")
+		case "$b" in
+			index.html | index.html.br | index.html.gz | chunk.name | patched.name | patched.names | html.names) continue ;;
+		esac
+		case " $(printf '%s ' $names)" in
+			*" ${b%.br} "* | *" ${b%.gz} "*) ;;
 			*) rm -f "$f" ;;
 		esac
 	done
 
-	verify "$name"
+	verify
 }
 
 verify() {
-	name=$1
-	path="/assets/$name"
+	names=$(cat "$PATCH_DIR/patched.names")
+	html_names=$(cat "$PATCH_DIR/html.names")
+	first=$(printf '%s\n' $names | head -n 1)
 
 	# app-proxy needs a moment to come back before it will serve the asset.
 	i=0
 	while [ "$i" -lt 30 ]; do
-		code=$(compose exec -T edge wget -qS --spider "http://app-proxy:8080$path" 2>&1 \
+		code=$(compose exec -T edge wget -qS --spider "http://app-proxy:8080/assets/$first" 2>&1 \
 			| sed -n 's/.*HTTP\/1\.[01] \([0-9]*\).*/\1/p' | head -n 1) || code=''
 		[ "${code:-}" = "200" ] && break
 		i=$((i + 1))
 		sleep 1
 	done
-	[ "${code:-000}" = "200" ] || die "app-proxy still answers ${code:-no response} for $path"
+	[ "${code:-000}" = "200" ] || die "app-proxy still answers ${code:-no response} for /assets/$first"
 
 	echo
 	fail=0
-	for enc in identity gzip br; do
-		case "$enc" in
-			identity) want=$(sha256sum "$PATCH_DIR/$name" | cut -d' ' -f1) ;;
-			gzip) want=$(sha256sum "$PATCH_DIR/$name.gz" | cut -d' ' -f1) ;;
-			br) want=$(sha256sum "$PATCH_DIR/$name.br" | cut -d' ' -f1) ;;
-		esac
-		# wget hands the body over untouched, so the precompressed siblings can be
-		# compared byte for byte.
-		got=$(compose exec -T edge wget -qO- --header="Accept-Encoding: $enc" \
-			"http://app-proxy:8080$path" | sha256sum | cut -d' ' -f1)
-		if [ "$got" = "$want" ]; then
-			printf 'chunk      %-9s patched\n' "$enc"
-		else
-			printf 'chunk      %-9s WRONG BYTES\n' "$enc"
-			fail=1
-		fi
+	for n in $names; do
+		for enc in identity gzip br; do
+			case "$enc" in
+				identity) want=$(sha256sum "$PATCH_DIR/$n" | cut -d' ' -f1) ;;
+				gzip) want=$(sha256sum "$PATCH_DIR/$n.gz" | cut -d' ' -f1) ;;
+				br) want=$(sha256sum "$PATCH_DIR/$n.br" | cut -d' ' -f1) ;;
+			esac
+			# wget hands the body over untouched, so the precompressed siblings can be
+			# compared byte for byte.
+			got=$(compose exec -T edge wget -qO- --header="Accept-Encoding: $enc" \
+				"http://app-proxy:8080/assets/$n" | sha256sum | cut -d' ' -f1)
+			if [ "$got" = "$want" ]; then
+				printf '%-32s %-9s patched\n' "$n" "$enc"
+			else
+				printf '%-32s %-9s WRONG BYTES\n' "$n" "$enc"
+				fail=1
+			fi
+		done
 	done
-	[ "$fail" -eq 0 ] || die 'app-proxy is not serving the patched chunk'
+	[ "$fail" -eq 0 ] || die 'app-proxy is not serving the patched files'
 
 	# The HTML is what makes the patch reachable, and it is the one thing no cache
 	# holds on to, so check it at the origin and through the public hostname.
 	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
 	[ -n "$domain" ] || die 'no FLUXER_DOMAIN in .env, cannot check the public URL'
+	local_html=$(compose exec -T edge wget -qO- http://app-proxy:8080/ 2>/dev/null) || local_html=''
+	pub_html=$(curl -s --max-time 30 "https://$domain/") || pub_html=''
+	for n in $html_names; do
+		case "$local_html" in
+			*"/assets/$n"*) printf 'html  app-proxy  loads %s\n' "$n" ;;
+			*) die "the served index.html does not load /assets/$n" ;;
+		esac
+		case "$pub_html" in
+			*"/assets/$n"*) printf 'html  public     loads %s\n' "$n" ;;
+			*) die "https://$domain/ does not load /assets/$n yet" ;;
+		esac
+	done
 
-	local_html=$(compose exec -T edge wget -qO- http://app-proxy:8080/ 2>/dev/null \
-		| grep -c "/assets/$name" || true)
-	[ "${local_html:-0}" -ge 1 ] && printf 'html       %-9s points at the patched chunk\n' 'app-proxy' \
-		|| die 'the served index.html does not reference the patched chunk'
-
-	pub_html=$(curl -s --max-time 30 "https://$domain/" | grep -c "/assets/$name" || true)
-	[ "${pub_html:-0}" -ge 1 ] && printf 'html       %-9s points at the patched chunk\n' 'public' \
-		|| die "https://$domain/ does not reference the patched chunk yet"
-
-	pub_chunk=$(curl -s --max-time 120 -H 'Accept-Encoding: identity' "https://$domain$path" \
-		| sha256sum | cut -d' ' -f1)
-	[ "$pub_chunk" = "$(sha256sum "$PATCH_DIR/$name" | cut -d' ' -f1)" ] \
-		&& printf 'chunk      %-9s patched\n' 'public' \
-		|| die "https://$domain$path is not serving the patched bytes"
+	for n in $names; do
+		pub=$(curl -s --max-time 120 -H 'Accept-Encoding: identity' "https://$domain/assets/$n" \
+			| sha256sum | cut -d' ' -f1)
+		[ "$pub" = "$(sha256sum "$PATCH_DIR/$n" | cut -d' ' -f1)" ] \
+			&& printf '%-32s %-9s patched\n' "$n" 'public' \
+			|| die "https://$domain/assets/$n is not serving the patched bytes"
+	done
 
 	echo
-	echo "Visionary badge patch applied and live at $path. A normal reload picks it up."
+	echo "Visionary badge patch applied and live. A normal reload picks it up."
 }
 
 case "${1:-apply}" in
