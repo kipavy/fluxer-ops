@@ -78,14 +78,14 @@ if [ -f "$FLUXER_DIR/docker-compose.override.yml" ] \
 	&& grep -q 'badge-patch.sh' "$FLUXER_DIR/docker-compose.override.yml"; then
 	BADGE_PATCHED=1
 	echo
-	echo "--- taking the Plutonium badge patch off for the update ---"
+	echo "--- taking the Visionary badge patch off for the update ---"
 	./ops/badge-patch.sh --revert
 fi
 
 reapply_badge_patch() {
 	[ "$BADGE_PATCHED" -eq 1 ] || return 0
 	echo
-	echo "--- re-applying the Plutonium badge patch to the new bundle ---"
+	echo "--- re-applying the Visionary badge patch to the new bundle ---"
 	./ops/badge-patch.sh \
 		|| echo "WARNING: the badge patch did not re-apply. Run: fluxer badge-patch" >&2
 }
@@ -113,7 +113,7 @@ else
 	# Deliberately not re-applied: patching a half-updated stack is worse than
 	# running unpatched, and unpatched is a working app without the badge.
 	if [ "$BADGE_PATCHED" -eq 1 ]; then
-		echo "The Plutonium badge patch is OFF. Re-apply with 'fluxer badge-patch' once this is sorted." >&2
+		echo "The Visionary badge patch is OFF. Re-apply with 'fluxer badge-patch' once this is sorted." >&2
 	fi
 	exit 1
 fi

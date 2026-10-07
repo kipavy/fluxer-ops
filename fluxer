@@ -280,7 +280,7 @@ cmd_rollback() {
 	if [ -f "$FLUXER_DIR/docker-compose.override.yml" ] \
 		&& grep -q 'badge-patch.sh' "$FLUXER_DIR/docker-compose.override.yml"; then
 		patched=1
-		echo "Taking the Plutonium badge patch off before rolling back."
+		echo "Taking the Visionary badge patch off before rolling back."
 		"$OPS/badge-patch.sh" --revert
 	fi
 
