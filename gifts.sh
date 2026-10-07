@@ -51,10 +51,15 @@
 # Visionaries community, giving it the Visionary role: FLUXER_VISIONARIES_GUILD_ID and
 # FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID. That is one community for the whole
 # instance, whichever community the link is posted in. Without it the api refuses the
-# redemption and rolls the code back, so 'create' will not mint a lifetime code until
-# 'setup-lifetime' has pointed both at a community and role that exist and the api runs
-# with them. A missing role alone would not fail a redemption (the api only logs it),
-# but it writes the dangling role id into the member, so it is required too.
+# redemption and rolls the code back, so a lifetime code is only minted once both
+# point at a community and role that exist and the api runs with them. The first
+# 'create --duration lifetime' sets that up by itself (setup-lifetime): it picks the
+# community (asks if there are several) and creates a "Visionary" role with no
+# permissions if there is none, written as GuildRoleService.createRole writes it.
+# The gateway keeps communities in memory and is not told about a role written
+# here, so creating one restarts the gateway once. A missing role alone would not
+# fail a redemption (the api only logs it), but it writes the dangling role id into
+# the member, so it is required too.
 # Redeemed here, a lifetime code is premium.sh's lifetime grant: same visionary_slots
 # numbering, no community join.
 #
@@ -122,7 +127,8 @@ usage: gifts.sh create [--duration 1m] [--count N] [--quiet]
 
   create          mint N codes (default 1, at most 100), each worth --duration of
                   Plutonium: Nd, Nw, Nm or Ny, N from 1 to 3650 (default 1m), or
-                  lifetime (Visionary). --quiet prints only the codes.
+                  lifetime (Visionary; the first one runs setup-lifetime by itself).
+                  --quiet prints only the codes.
   list            every code, newest first, or only the ones in one state
   show            one code in detail
   revoke          make an unredeemed code unusable, keeping it in the list
@@ -130,9 +136,10 @@ usage: gifts.sh create [--duration 1m] [--count N] [--quiet]
                   code needs --force: its premium stays, only the record goes.
   redeem          apply a code to an account, as the app would have
   setup-lifetime  point the instance's Visionaries community and role at a community
-                  and a role that exist, so lifetime links redeem in the app. With one
-                  community it is picked; the role defaults to one named "Visionary".
-                  Create that role in the app first (no permissions needed).
+                  and a role, so lifetime links redeem in the app. With one community
+                  it is picked; the role defaults to "Visionary" and is created, with
+                  no permissions, if missing (that restarts the gateway once: clients
+                  reconnect within seconds). Runs by itself on the first lifetime code.
 
   <code> is the 32-character code, or a link ending in it.
   <user> is a username, or username#tag when several accounts share the name.
@@ -194,7 +201,11 @@ cmd_create() {
 	duration=$1 count=$2 quiet=$3
 	case "$duration" in
 		lifetime | visionary)
-			lifetime_ready || exit 1
+			if ! lifetime_ready 2> /dev/null; then
+				echo "Lifetime links are not set up on this instance yet; setting them up first." >&2
+				cmd_setup_lifetime "$(env_value FLUXER_VISIONARIES_GUILD_ID)" '' >&2
+				echo >&2
+			fi
 			unit=months qty=0
 			;;
 		*)
@@ -785,6 +796,52 @@ SQL
 	return 0
 }
 
+# A snowflake as SnowflakeService would make one: ms since FLUXER_EPOCH, a worker id
+# and a sequence. Worker 1023 is the top of the range, kept out of the services' way;
+# the sequence is random. Uniqueness is checked against guild_roles on insert.
+new_snowflake() {
+	python3 -c '
+import secrets, time
+print(((int(time.time() * 1000) - 1420070400000) << 22) | (1023 << 12) | secrets.randbelow(4096))'
+}
+
+# GuildRoleService.createRole's row: position 1, colour 0, not hoisted, not
+# mentionable, version 1, permissions 0 (the api would copy @everyone's when none are
+# given; a role every lifetime redeemer gets should grant nothing). Unset columns are
+# left out, as the KV store writes them. Prints the new role id.
+create_role() {
+	gid=$1 name=$2
+	for _try in 1 2 3; do
+		rid=$(new_snowflake)
+		out=$(run_sql -At -v gid="$gid" -v rid="$rid" -v name="$name" <<'SQL'
+\set VERBOSITY terse
+begin;
+insert into fluxer_kv (table_name, partition_key, row_key, row_data, expires_at, updated_at)
+select 'guild_roles', k, k,
+       jsonb_build_object(
+         'name', :'name',
+         'color', 0,
+         'hoist', false,
+         'role_id', jsonb_build_object('__fluxer_type', 'bigint', 'value', :'rid'),
+         'version', 1,
+         'guild_id', jsonb_build_object('__fluxer_type', 'bigint', 'value', :'gid'),
+         'position', 1,
+         'mentionable', false,
+         'permissions', jsonb_build_object('__fluxer_type', 'bigint', 'value', '0')),
+       null, now()
+from (select '{"__fluxer_type":"bigint","value":"' || :'gid' || '"}' || chr(31)
+             || '{"__fluxer_type":"bigint","value":"' || :'rid' || '"}' as k) key
+where not exists (select 1 from fluxer_kv where table_name = 'guild_roles'
+                  and row_data->'role_id'->>'value' = :'rid')
+returning 1;
+commit;
+SQL
+)
+		[ "$out" = 1 ] && { printf '%s\n' "$rid"; return 0; }
+	done
+	die "could not create the role (no free id after 3 tries)"
+}
+
 cmd_setup_lifetime() {
 	community=$1 role=${2:-Visionary}
 	case "$community$role" in
@@ -823,11 +880,16 @@ order by 2, 1;
 SQL
 )
 	rmatch=$(printf '%s\n' "$roles" | awk -F '|' -v r="$role" '$1 == r || tolower($2) == tolower(r)')
+	created_role=0
 	if [ -z "$rmatch" ]; then
-		echo "gifts: no role '$role' in $gname. Create one in the app (community settings," >&2
-		echo "  Roles): any name, no permissions, then run this again, adding --role <name>" >&2
-		echo "  if it is not called 'Visionary'. Lifetime redeemers get that role." >&2
-		exit 1
+		case "$role" in
+			*[!0-9]*) ;;
+			*) die "no role with id $role in $gname" ;;
+		esac
+		rid=$(create_role "$gid" "$role")
+		created_role=1
+		rmatch="$rid|$role|0"
+		echo "Created the '$role' role in $gname (no permissions, not shown separately)."
 	fi
 	[ "$(printf '%s\n' "$rmatch" | grep -c .)" -eq 1 ] || die "several roles in $gname are named '$role'; give its id"
 	rid=${rmatch%%|*} rest=${rmatch#*|}
@@ -848,6 +910,10 @@ SQL
 	echo "Recreating $svcs so they pick it up."
 	# shellcheck disable=SC2086 # one word per service
 	(cd "$FLUXER_DIR" && docker compose up -d $svcs 2>&1) | grep -v 'level=warning' || true
+	if [ "$created_role" -eq 1 ]; then
+		echo "Restarting the gateway so it loads the new role (clients reconnect within seconds)."
+		(cd "$FLUXER_DIR" && docker compose restart gateway 2>&1) | grep -v 'level=warning' || true
+	fi
 	lifetime_ready || die "set in .env, but not live yet; check 'fluxer ps'"
 	echo
 	echo "Lifetime links are ready. Redeemers join $gname and get the '$rname' role."

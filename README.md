@@ -497,8 +497,7 @@ none.
 ### Lifetime (Visionary) gift links
 
 ```sh
-fluxer gifts setup-lifetime                    # once per instance
-fluxer gifts create --duration lifetime        # then as many as you like
+fluxer gifts create --duration lifetime        # the first one also sets the instance up
 ```
 
 A lifetime code is `duration_quantity` 0, as upstream's Stripe checkout mints them.
@@ -511,16 +510,22 @@ redemption and rolls the code back. A missing role alone would not fail it (the 
 only logs that), but it writes the dangling role id into the member, so the CLI
 requires both.
 
-`setup-lifetime` points them at a community and role that exist: with a single
-community it is picked, otherwise `--community <name|id>`; the role defaults to one
-named `Visionary` (`--role` for another). Create that role in the app first -- no
-permissions needed; `@everyone` and any role with Administrator are refused. It
-writes both keys with `env.sh` and recreates only the services that read them.
+Nothing to do by hand: the first `create --duration lifetime` runs
+`fluxer gifts setup-lifetime`, which points both keys at a community and a role.
+With a single community it is picked, otherwise it asks for
+`--community <name|id>`. The role defaults to `Visionary` (`--role` for another);
+if there is none, it is **created** with no permissions, not hoisted and not
+mentionable, written exactly as `GuildRoleService.createRole` writes a role row.
+`@everyone` and any role with Administrator are refused. It writes both keys with
+`env.sh`, recreates only the services that read them, and -- only when it created
+the role -- restarts the gateway once, because the gateway holds communities in
+memory and is not told about a row written behind its back. Connected clients
+reconnect within seconds. No audit-log entry is written for that role.
 
-`create --duration lifetime` checks the same three things before minting -- both
-keys set, the community and role still exist, and the running api has them -- so an
-instance that is not set up, or no longer is, never hands out a link that cannot be
-redeemed. `redeem` applies a lifetime code here without any of that: it is
+Every later `create --duration lifetime` checks the same things before minting --
+both keys set, the community and role still exist, and the running api has them --
+and sets them up again if not, so a link that cannot be redeemed is never handed
+out. `redeem` applies a lifetime code here without any of that: it is
 `fluxer premium <user>`'s lifetime grant, with no community join.
 
 An account with a time-limited gift still running can redeem a lifetime gift; see
