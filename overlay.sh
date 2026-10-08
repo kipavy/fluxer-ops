@@ -45,7 +45,10 @@ ours() {
 	[ "$first" = "$MARKER" ] || [ "$first" = "$LEGACY_MARKER" ]
 }
 badge_on() { [ -s "$PATCH_DIR/patched.names" ] && [ -s "$PATCH_DIR/chunk.name" ] && [ -f "$PATCH_DIR/index.html" ]; }
-panel_on() { [ -f "$PANEL_DIR/enabled" ]; }
+# On means enabled AND everything it mounts is there: a missing bind source makes docker
+# create a root-owned directory in its place, and edge then fails to start.
+panel_enabled() { [ -f "$PANEL_DIR/enabled" ]; }
+panel_on() { panel_enabled && [ -f "$PANEL_DIR/Caddyfile" ] && [ -d "$PANEL_DIR/www" ] && [ -d "$PANEL_DIR/run" ]; }
 
 app_proxy_image() {
 	img=$(compose config --images 2> /dev/null | grep 'fluxer-app-proxy' | head -n 1) || img=''
@@ -54,11 +57,20 @@ app_proxy_image() {
 }
 
 # Was the badge patch built from the release app-proxy runs now? Its stock chunk is
-# still in the image only if so.
+# still in the image only if so, and so is every other release-specific file its
+# index.html names (entry, loaders, runtime) that the patch did not replace. One probe.
 badge_current() {
-	chunk=$(cat "$PATCH_DIR/chunk.name")
+	needed=$(cat "$PATCH_DIR/chunk.name")
+	patched=" $(tr '\n' ' ' < "$PATCH_DIR/patched.names")"
+	for n in $(grep -o '/assets/[A-Za-z0-9._-]*' "$PATCH_DIR/index.html" | sed 's|^/assets/||' | sort -u); do
+		case "$patched" in
+			*" $n "*) ;;
+			*) needed="$needed $n" ;;
+		esac
+	done
+	# shellcheck disable=SC2016 # the container's shell expands $f and $@
 	docker run --rm --pull never --entrypoint sh "$(app_proxy_image)" \
-		-c "test -f $ASSET_DIR/$chunk" > /dev/null 2>&1
+		-c 'd=$1; shift; for f; do test -f "$d/$f" || exit 1; done' sh "$ASSET_DIR" $needed > /dev/null 2>&1
 }
 
 # The badge's files to mount, space-separated, or nothing when it is off or stale.
@@ -135,7 +147,11 @@ cmd_apply() {
 	fi
 	names=$(badge_names)
 	panel=0
-	if panel_on; then panel=1; fi
+	if panel_on; then
+		panel=1
+	elif panel_enabled; then
+		echo "overlay: the Ops panel is enabled but ops/panel/ is incomplete (Caddyfile, www/ or run/ missing); leaving it out until it is restored" >&2
+	fi
 
 	if [ -z "$names" ] && [ "$panel" = 0 ]; then
 		if ours; then

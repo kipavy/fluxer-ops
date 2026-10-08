@@ -22,10 +22,31 @@ case "$1 $2" in
 	"compose config") echo ghcr.io/fluxerapp/fluxer-app-proxy-self-hosted:v1; exit 0 ;;
 	"compose up") exit 0 ;;
 esac
-[ "$1" = run ] && exit "${DOCKER_RUN_RC:-0}"
+if [ "$1" = run ]; then
+	for a in "$@"; do
+		case "$a" in
+			# The copy of the stock index.html out of the image.
+			*:/out) cat "$STOCK_HTML" > "${a%:/out}/base.html"; exit 0 ;;
+		esac
+		# Files named in $DOCKER_MISSING are "not in the image".
+		for m in ${DOCKER_MISSING:-}; do
+			[ "$a" = "$m" ] && exit 1
+		done
+	done
+	exit "${DOCKER_RUN_RC:-0}"
+fi
 exit 0
 EOF
 chmod +x "$tmp/stub/docker"
+# node stub: compress.js is replaced by copies, enough to check what gets composed.
+cat > "$tmp/stub/node" <<'EOF'
+#!/bin/sh
+cp index.html index.html.br
+cp index.html index.html.gz
+EOF
+chmod +x "$tmp/stub/node"
+export STOCK_HTML="$tmp/stock.html"
+printf '<html><script nonce="n">stock</script><script src="/assets/stock-entry.js"></script></html>\n' > "$STOCK_HTML"
 export DOCKER_LOG="$tmp/docker.log"
 : > "$DOCKER_LOG"
 PATH="$tmp/stub:$PATH"
@@ -105,5 +126,94 @@ FLUXER_DIR="$tmp/inst" sh "$ops/overlay.sh" apply > /dev/null
 [ ! -e "$tmp/inst/docker-compose.override.yml" ] && pass "nothing on: our override removed" \
 	|| fail "nothing on: our override removed"
 assert_contains "nothing on: app-proxy and edge recreated stock" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+
+# --- the composition ----------------------------------------------------------------
+reset_state() {
+	rm -rf "$ops/patches" "$ops/panel" "$ops/overlay" "$tmp/inst/docker-compose.override.yml"
+	mkdir -p "$ops/patches"
+	: > "$DOCKER_LOG"
+}
+badge_state() {
+	printf 'c.js\n' > "$ops/patches/chunk.name"
+	printf 'c.1.js\nloader.2.js\n' > "$ops/patches/patched.names"
+	printf '<html><script nonce="n">badge-repointed</script><script src="/assets/entry.js" type="module"></script><script src="/assets/loader.2.js"></script></html>\n' \
+		> "$ops/patches/index.html"
+}
+panel_state() {
+	mkdir -p "$ops/panel/www" "$ops/panel/run"
+	: > "$ops/panel/Caddyfile"
+	: > "$ops/panel/enabled"
+}
+run_overlay() { FLUXER_DIR="$tmp/inst" sh "$ops/overlay.sh" "$@"; }
+
+# stale when a non-patched asset named by the patched index.html is gone from the image
+reset_state; badge_state
+: > "$DOCKER_LOG"
+err=$( (export DOCKER_MISSING=entry.js; load; badge_names > "$tmp/stale.out") 2>&1)
+assert_eq "badge with a vanished entry file is stale" "" "$(cat "$tmp/stale.out")"
+assert_contains "vanished entry file: reported" "built for another release" "$err"
+assert_contains "probe lists the non-patched asset" "entry.js" "$(cat "$DOCKER_LOG")"
+assert_contains "probe lists the stock chunk" "c.js" "$(cat "$DOCKER_LOG")"
+case "$(cat "$DOCKER_LOG")" in *"c.1.js"*) fail "probe skips patched files" ;; *) pass "probe skips patched files" ;; esac
+
+# (a) badge + panel
+reset_state; badge_state; panel_state
+run_overlay apply > /dev/null
+o=$(cat "$tmp/inst/docker-compose.override.yml")
+assert_contains "badge+panel: badge chunk mounted" "$ops/patches/c.1.js:/srv/app/static/assets/c.1.js:ro" "$o"
+assert_contains "badge+panel: edge section" "  edge:" "$o"
+assert_contains "badge+panel: Caddyfile mounted" "$ops/panel/Caddyfile:/etc/caddy/Caddyfile:ro" "$o"
+html=$(cat "$ops/overlay/index.html")
+assert_contains "badge+panel: badge's repointed content" "badge-repointed" "$html"
+assert_contains "badge+panel: panel tag before the first external script" \
+	'<script src="/ops-panel.js"></script><script src="/assets/entry.js"' "$html"
+assert_eq "badge+panel: .br written" "$html" "$(cat "$ops/overlay/index.html.br")"
+assert_eq "badge+panel: .gz written" "$html" "$(cat "$ops/overlay/index.html.gz")"
+assert_contains "badge+panel: services recreated" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+
+# (b) stale badge + panel
+reset_state; badge_state; panel_state
+err=$(DOCKER_RUN_RC=1 run_overlay apply 2>&1 > /dev/null)
+assert_contains "stale badge + panel: warned" "built for another release" "$err"
+o=$(cat "$tmp/inst/docker-compose.override.yml")
+case "$o" in *"/patches/"*) fail "stale badge + panel: no patches mounts" ;; *) pass "stale badge + panel: no patches mounts" ;; esac
+assert_contains "stale badge + panel: edge section" "  edge:" "$o"
+html=$(cat "$ops/overlay/index.html")
+assert_contains "stale badge + panel: built from the stock html" "stock-entry.js" "$html"
+assert_contains "stale badge + panel: tag before the first external script" \
+	'<script src="/ops-panel.js"></script><script src="/assets/stock-entry.js"' "$html"
+case "$html" in *badge-repointed*) fail "stale badge + panel: old badge html not used" ;; *) pass "stale badge + panel: old badge html not used" ;; esac
+
+# panel enabled but its files are gone: left out, never mounted
+reset_state; badge_state; panel_state
+rm -f "$ops/panel/Caddyfile"
+err=$(run_overlay apply 2>&1 > /dev/null)
+assert_contains "incomplete panel: warned" "incomplete" "$err"
+o=$(cat "$tmp/inst/docker-compose.override.yml")
+case "$o" in *"edge:"*) fail "incomplete panel: no edge section" ;; *) pass "incomplete panel: no edge section" ;; esac
+assert_contains "incomplete panel: badge still served" "$ops/patches/c.1.js:" "$o"
+for missing in www run; do
+	reset_state; panel_state
+	rmdir "$ops/panel/$missing"
+	err=$(run_overlay apply 2>&1 > /dev/null)
+	assert_contains "panel without $missing/: warned" "incomplete" "$err"
+	[ ! -e "$tmp/inst/docker-compose.override.yml" ] && pass "panel without $missing/: no override" \
+		|| fail "panel without $missing/: no override"
+done
+
+# (c) suspend
+reset_state; badge_state; panel_state
+run_overlay apply > /dev/null
+: > "$DOCKER_LOG"
+run_overlay suspend > /dev/null
+[ ! -e "$tmp/inst/docker-compose.override.yml" ] && pass "suspend removes our override" || fail "suspend removes our override"
+assert_contains "suspend recreates app-proxy and edge" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+[ -f "$ops/panel/enabled" ] && [ -s "$ops/patches/patched.names" ] && pass "suspend keeps every feature's state" \
+	|| fail "suspend keeps every feature's state"
+printf 'services:\n  web: {}\n' > "$tmp/inst/docker-compose.override.yml"
+: > "$DOCKER_LOG"
+run_overlay suspend > /dev/null
+assert_eq "suspend leaves a foreign override alone" "$(printf 'services:\n  web: {}')" "$(cat "$tmp/inst/docker-compose.override.yml")"
+assert_eq "suspend on a foreign override: docker never called" "" "$(cat "$DOCKER_LOG")"
 
 finish
