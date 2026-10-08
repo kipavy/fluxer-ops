@@ -75,7 +75,7 @@ Stack     logs  up  down  ps  restart  psql  valkey  sh <svc>
 Updates   changelog  update  rollback  prune
 Accounts  users  premium  gifts  badge-patch
 Backups   backup  backups  verify-backup  restore  offsite
-Host      notify  disk  env  cf-ips  firewall-fix  setup
+Host      notify  disk  env  cf-ips  firewall-fix  setup  panel
 ```
 
 It is a **thin dispatcher**, not a rewrite: it delegates to the scripts below,
@@ -106,6 +106,9 @@ Three commands are worth knowing before you need them:
 | `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
 | `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
 | `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
+| `overlay.sh` | `badge-patch.sh`, `panel.sh`, `update.sh` | The one writer of `docker-compose.override.yml` and the served `index.html`: composes the badge patch and the Ops panel. `suspend` drops it for an update. |
+| `panel.sh` | you, `update.sh` (`refresh`) | The in-app STAFF Ops panel: bridge unit, Caddy route, script. `off` is the kill switch. |
+| `ops_bridge.py` | systemd (`fluxer-ops-bridge`) | Runs allowlisted commands for the Ops panel after checking the session and STAFF. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
 | `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, rollback images. |
@@ -581,6 +584,58 @@ Deliberately **not** here: disable, ban, unban. The api's `tempBanUser` also end
 every session and emails the user; a row marked banned while its sessions stay live
 is worse than no command. Use the admin panel.
 
+## In-app Ops panel: `fluxer panel`
+
+The account commands and the read-only health ones, from the web app instead of a
+shell. A STAFF account opens the STAFF (developer tools) menu in a channel header,
+then **Ops…**, which has four tabs:
+
+- Gifts: create links (copy buttons included), list, show, revoke, delete, redeem.
+- Premium: grant, revoke, list.
+- Users: list, show, counts, STAFF on or off, mark an email verified.
+- Health: status, check, doctor, errors, disk, backups.
+
+```sh
+fluxer panel on        # install the bridge, add the route and the script
+fluxer panel status    # is it on, is the bridge answering, is the route live
+fluxer panel off       # the kill switch: bridge, route and script all gone
+```
+
+How it holds together:
+
+- **The bridge.** `ops_bridge.py` runs as a systemd unit (`fluxer-ops-bridge`) under this
+  user, with `NoNewPrivileges`, so nothing it starts can `sudo`. It listens on a Unix
+  socket in `ops/panel/run`, which only `edge` mounts; no port is opened.
+- **Each request.** The bridge asks the api who the session token belongs to and reads
+  the STAFF flag from the database every time, so removing STAFF cuts access at once.
+  It then runs one command from a fixed allowlist with a fixed argv: there is no shell,
+  and every argument is checked against a pattern.
+- **Throttling.** Every authenticated request counts against 60 a minute per user,
+  checked before the STAFF lookup so a stolen or stale token cannot be used to hammer
+  the database; rejected tokens are cached for the same reason. Writes get a second,
+  tighter limit of 30 a minute, and at most 8 requests run at once (503 beyond that).
+- **Audit.** Every change is logged (`journalctl -u fluxer-ops-bridge | grep audit`)
+  and sent through `notify.sh` under the key `ops-panel`. Any STAFF account can use
+  the panel, including to give STAFF to someone else, and that is the trace it leaves.
+- **The script.** `ops-panel.js` is served by `edge` at `/ops-panel.js`. `overlay.sh`
+  puts it in `index.html` ahead of the app's bundle, because it has to see the app's
+  first api calls to pick up the session. `overlay.sh` is now the only writer of
+  `docker-compose.override.yml`: it composes the badge patch and the panel, so either
+  can be turned off without the other. `premium.sh` finds out whether the badge is
+  applied from `ops/patches/patched.names`, not from the compose file.
+- **Going live safely.** `fluxer panel on` checks the new Caddyfile with edge's own
+  Caddy (`caddy adapt`) before it replaces the running one, retries the reload, and
+  puts the old file back if the reload still fails, so a bad route cannot take the
+  site down. `fluxer panel off` stops the bridge first, so the kill switch works even
+  if the Caddy step then fails.
+- **Updates and rollback.** `update.sh` takes both off before an update and puts them
+  back after (`fluxer panel refresh` rebuilds the Caddyfile copy from upstream's new
+  one). `fluxer rollback` does the same: overlay off, roll back, badge and panel back
+  on. `doctor` flags a copy that has drifted from upstream's.
+
+**Web app only.** The desktop and mobile apps never load this server's `index.html`
+(see *Known gaps*), so the panel, like the badge, is not there.
+
 ## Debugging: `errors`, `top`, `voice`, shells
 
 `fluxer psql`, `fluxer valkey` and `fluxer sh <svc>` are shells with the right
@@ -649,9 +704,9 @@ fluxer restore /tmp/r/backup
 - **No alert channel configured**, so alerting is wired but silent.
 - **The firewalld fix is written but not applied** (`fluxer firewall-fix --apply`).
 - The **uploads** half of a restore has never been run end to end.
-- **Client-side changes reach the web app only.** Anything this repository patches
-  into the client (the Visionary badge today) is served through this instance's
-  `index.html`, which only the browser loads. The desktop app renders from its own
+- **Client-side changes reach the web app only.** Anything this repository puts into
+  the client (the Visionary badge and the STAFF Ops panel) is served through this
+  instance's `index.html`, which only the browser loads. The desktop app renders from its own
   signed `fluxer_renderer` module (from `pkgs.fluxer.com`), or from a renderer bundled
   in the app when an instance turns modules off, so it never runs code from this
   server; the mobile apps ship their own client too. The same goes for **custom
