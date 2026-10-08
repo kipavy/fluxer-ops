@@ -184,6 +184,8 @@ MAX_BODY = 64 * 1024
 TOKEN = re.compile(r'[\x21-\x7e]{1,512}')
 SNOWFLAKE = re.compile(r'[0-9]{1,20}')
 NO_SESSION = 'No Fluxer session: reload the web app, then try again.'
+TOO_MANY = {'error': 'too many requests; wait a little'}
+MAX_CONCURRENT = 8
 
 
 class UpstreamError(Exception):
@@ -311,9 +313,14 @@ class Identity:
             with self._lock:
                 hit = self._cache.get(key)
             if hit and hit[0] > now:
-                return hit[1]
+                return hit[1]  # None: the api rejected this token a moment ago
         status, body = self._fetch(token)
         if status in (401, 403):
+            # Remembered too, so a loop of bad tokens cannot make the bridge call the api each time.
+            with self._lock:
+                if len(self._cache) > 1000:
+                    self._cache.clear()
+                self._cache[key] = (now + self.ttl, None)
             return None
         if status != 200:
             raise UpstreamError(f'api answered {status} for /users/@me')
@@ -355,13 +362,15 @@ def make_audit(ops):
 
 
 class Bridge:
-    def __init__(self, identity, domain, ops=OPS, run=None, audit=None, limiter=None):
+    def __init__(self, identity, domain, ops=OPS, run=None, audit=None, limiter=None, request_limiter=None):
         self.identity = identity
         self.origin = f'https://{domain}'
         self.ops = ops
         self.run = run or run_script
         self.audit = audit or (lambda *a: None)
         self.limiter = limiter or RateLimiter()
+        # Every authenticated request, STAFF or not, before the database is asked anything.
+        self.request_limiter = request_limiter or RateLimiter(limit=60)
 
     def handle(self, method, path, headers, body):
         try:
@@ -390,6 +399,8 @@ class Bridge:
             user = self.identity.whoami(token)
             if user is None:
                 return 401, {'error': NO_SESSION}
+            if not self.request_limiter.allow(user['id']):
+                return 429, TOO_MANY
             return 200, dict(user, staff=self.identity.is_staff(user['id']))
 
         try:
@@ -404,6 +415,8 @@ class Bridge:
         user = self.identity.whoami(token, fresh=bool(action and action.write))
         if user is None:
             return 401, {'error': NO_SESSION}
+        if not self.request_limiter.allow(user['id']):
+            return 429, TOO_MANY
         if not self.identity.is_staff(user['id']):
             return 403, {'error': 'STAFF accounts only'}
         try:
@@ -427,18 +440,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     server_version = 'fluxer-ops-bridge'
     protocol_version = 'HTTP/1.1'
 
-    def _serve(self):
-        length = int(self.headers.get('Content-Length') or 0)
-        if length > MAX_BODY:
-            status, payload = 413, {'error': 'request too large'}
-            self.close_connection = True
-        else:
-            body = self.rfile.read(length) if length else b''
-            try:
-                status, payload = self.bridge.handle(self.command, self.path, self.headers, body)
-            except Exception:  # never let one request take the bridge down
-                log.exception('request failed')
-                status, payload = 500, {'error': 'internal error in the bridge'}
+    slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+
+    def _reply(self, status, payload):
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
@@ -446,6 +450,29 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-store')
         self.end_headers()
         self.wfile.write(data)
+
+    def _serve(self):
+        if not self.slots.acquire(blocking=False):
+            self.close_connection = True
+            return self._reply(503, {'error': 'bridge busy; try again'})
+        try:
+            raw = (self.headers.get('Content-Length') or '0').strip()
+            if not (raw.isascii() and raw.isdigit()):
+                self.close_connection = True
+                return self._reply(400, {'error': 'bad Content-Length'})
+            length = int(raw)
+            if length > MAX_BODY:
+                self.close_connection = True
+                return self._reply(413, {'error': 'request too large'})
+            body = self.rfile.read(length) if length else b''
+            try:
+                status, payload = self.bridge.handle(self.command, self.path, self.headers, body)
+            except Exception:  # never let one request take the bridge down
+                log.exception('request failed')
+                status, payload = 500, {'error': 'internal error in the bridge'}
+            self._reply(status, payload)
+        finally:
+            self.slots.release()
 
     do_GET = _serve
     do_POST = _serve
@@ -467,7 +494,7 @@ def serve(socket_path, bridge):
         os.unlink(socket_path)  # left behind by a crash or a reboot
     except FileNotFoundError:
         pass
-    handler = type('Handler', (_Handler,), {'bridge': bridge})
+    handler = type('Handler', (_Handler,), {'bridge': bridge, 'slots': threading.BoundedSemaphore(MAX_CONCURRENT)})
     old = os.umask(0o117)
     try:
         server = _Server(socket_path, handler)

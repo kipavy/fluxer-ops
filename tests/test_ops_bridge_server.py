@@ -103,7 +103,8 @@ class Auth(unittest.TestCase):
 
     def test_upstream_down_502(self):
         h = Harness(identity=FakeIdentity(error=ob.UpstreamError('api unreachable')))
-        status, payload = h.post({'action': 'gifts.list'})
+        with self.assertLogs('ops-bridge', level='WARNING'):
+            status, payload = h.post({'action': 'gifts.list'})
         self.assertEqual(status, 502)
         self.assertIn('api unreachable', payload['error'])
 
@@ -192,6 +193,26 @@ class Limits(unittest.TestCase):
         now[0] = 61.0
         self.assertTrue(rl.allow('1'))
 
+    def test_non_staff_loop_is_stopped_before_the_database(self):
+        h = Harness()
+        codes = [h.post({'action': 'gifts.list'}, token='tok-pleb')[0] for _ in range(61)]
+        self.assertEqual(codes, [403] * 60 + [429])
+        self.assertEqual(len([c for c in h.identity.calls if c[0] == 'is_staff']), 60)
+        b = h.bridge
+        self.assertEqual(b.handle('GET', '/whoami', {'Authorization': 'tok-pleb'}, b'')[0], 429)
+
+    def test_staff_reads_are_limited_too(self):
+        h = Harness()
+        codes = [h.post({'action': 'gifts.list'})[0] for _ in range(61)]
+        self.assertEqual(codes, [200] * 60 + [429])
+
+    def test_request_limiter_is_injectable_and_per_user(self):
+        h = Harness()
+        h.bridge.request_limiter = ob.RateLimiter(limit=1)
+        self.assertEqual(h.post({'action': 'gifts.list'})[0], 200)
+        self.assertEqual(h.post({'action': 'gifts.list'})[0], 429)
+        self.assertEqual(h.post({'action': 'gifts.list'}, token='tok-pleb')[0], 403)
+
     def test_writes_limited_reads_not(self):
         h = Harness(limiter=ob.RateLimiter(limit=1))
         self.assertEqual(h.post({'action': 'users.verify-email', 'args': {'user': 'bob'}})[0], 200)
@@ -222,11 +243,16 @@ class Identity(unittest.TestCase):
         ident.whoami('t')
         self.assertEqual(len(self.fetched), 3)
 
-    def test_rejected_token_is_none_and_not_cached(self):
-        ident = self.make([(401, b'{}'), (401, b'{}')])
+    def test_rejected_token_is_remembered_for_the_ttl(self):
+        ident = self.make([(401, b'{}')] * 3)
         self.assertIsNone(ident.whoami('t'))
         self.assertIsNone(ident.whoami('t'))
+        self.assertEqual(len(self.fetched), 1)
+        self.assertIsNone(ident.whoami('t', fresh=True))
         self.assertEqual(len(self.fetched), 2)
+        self.now[0] = 61.0
+        self.assertIsNone(ident.whoami('t'))
+        self.assertEqual(len(self.fetched), 3)
 
     def test_odd_answers_are_upstream_errors(self):
         for answer in ((500, b''), (200, b'not json'), (200, b'{"username": "x"}'), (200, b'{"id": "12; drop"}')):
@@ -296,6 +322,54 @@ class Transport(unittest.TestCase):
                 self.assertEqual(resp.getheader('Cache-Control'), 'no-store')
                 self.assertEqual(payload['stdout'], '[redeem]\n[' + 'A' * 32 + ']\n[bob#0042]\n')
                 conn.close()
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def _raw(self, path, request):
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(10)
+        s.connect(path)
+        s.sendall(request)
+        data = b''
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        s.close()
+        return data
+
+    def test_bad_content_length_is_400_and_closes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'b.sock')
+            srv = ob.serve(path, ob.Bridge(FakeIdentity(), DOMAIN, ops=tmp))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                for value in ('abc', '-1', '1.5'):
+                    req = f'POST /run HTTP/1.1\r\nHost: b\r\nContent-Length: {value}\r\n\r\n'.encode()
+                    data = self._raw(path, req)
+                    self.assertTrue(data.startswith(b'HTTP/1.1 400'), (value, data))
+                    self.assertIn(b'bad Content-Length', data)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_busy_bridge_answers_503(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'b.sock')
+            srv = ob.serve(path, ob.Bridge(FakeIdentity(), DOMAIN, ops=tmp))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                slots = srv.RequestHandlerClass.slots
+                for _ in range(ob.MAX_CONCURRENT):
+                    self.assertTrue(slots.acquire(blocking=False))
+                data = self._raw(path, b'GET /health HTTP/1.1\r\nHost: b\r\n\r\n')
+                self.assertTrue(data.startswith(b'HTTP/1.1 503'), data)
+                self.assertIn(b'bridge busy', data)
+                slots.release()
+                data = self._raw(path, b'GET /health HTTP/1.1\r\nHost: b\r\nConnection: close\r\n\r\n')
+                self.assertTrue(data.startswith(b'HTTP/1.1 200'), data)
             finally:
                 srv.shutdown()
                 srv.server_close()
