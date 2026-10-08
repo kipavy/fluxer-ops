@@ -98,7 +98,7 @@ done
 
 # 8. The Ops panel bridge's unit tests (python3 stdlib only, no instance needed).
 if command -v python3 > /dev/null 2>&1; then
-	if out=$(python3 -m unittest discover -s tests -p 'test_*.py' 2>&1); then
+	if out=$(python3 -B -m unittest discover -s tests -p 'test_*.py' 2>&1); then
 		ok "bridge unit tests"
 	else
 		fail "bridge unit tests:"; printf '%s\n' "$out" | tail -n 30 | sed 's/^/      /'

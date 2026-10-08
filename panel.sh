@@ -108,6 +108,15 @@ html_loads_panel() {
 	return "$rc"
 }
 
+reload_edge() {
+	compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1
+}
+
+# The panel is switched on by now: say so, and how to take it off.
+die_still_on() {
+	die "$* The panel is still ON; 'fluxer panel off' removes it."
+}
+
 cmd_on() {
 	need_instance
 	[ -n "$(domain)" ] || die "no FLUXER_DOMAIN in $FLUXER_DIR/.env"
@@ -122,11 +131,12 @@ cmd_on() {
 		rm -f "$PANEL_DIR/Caddyfile.new"
 		die "$FLUXER_DIR/Caddyfile has no single catch-all 'handle {' to put the route before"
 	fi
-	# Copied over, never replaced: edge has the Caddyfile mounted as a file, and a
-	# replaced file would leave it reading the old inode.
-	cat "$PANEL_DIR/Caddyfile.new" > "$PANEL_DIR/Caddyfile"
-	rm -f "$PANEL_DIR/Caddyfile.new"
-	cat "$OPS/ops-panel.js" > "$PANEL_DIR/www/ops-panel.js"
+	# Checked with edge's own Caddy before anything goes live: a bad file must not be mounted.
+	if ! compose exec -T edge caddy adapt --adapter caddyfile --config /dev/stdin \
+		< "$PANEL_DIR/Caddyfile.new" > /dev/null; then
+		rm -f "$PANEL_DIR/Caddyfile.new"
+		die "edge (is it running?) rejected the panel's Caddyfile; nothing was changed"
+	fi
 
 	render_unit "$(id -un)" "$(id -gn)" "$(command -v python3)" > "$PANEL_DIR/unit.new"
 	if ! cmp -s "$PANEL_DIR/unit.new" "$UNIT_FILE"; then
@@ -137,29 +147,66 @@ cmd_on() {
 	rm -f "$PANEL_DIR/unit.new"
 	sudo systemctl enable "$UNIT" > /dev/null 2>&1
 	sudo systemctl restart "$UNIT"
-	until_ok 15 bridge_health || die "the bridge does not answer on $SOCKET - see: journalctl -u $UNIT -n 50"
+	if ! until_ok 15 bridge_health; then
+		rm -f "$PANEL_DIR/Caddyfile.new"
+		sudo systemctl disable --now "$UNIT" > /dev/null 2>&1 || true
+		die "the bridge does not answer on $SOCKET; it was stopped and disabled so it does not crash-loop - see: journalctl -u $UNIT -n 50"
+	fi
 	echo "Bridge answering on $SOCKET."
+
+	# Copied over, never replaced: edge has the Caddyfile mounted as a file, and a
+	# replaced file would leave it reading the old inode.
+	had_prev=0
+	if [ -f "$PANEL_DIR/Caddyfile" ]; then
+		cp "$PANEL_DIR/Caddyfile" "$PANEL_DIR/Caddyfile.prev"
+		had_prev=1
+	fi
+	cat "$PANEL_DIR/Caddyfile.new" > "$PANEL_DIR/Caddyfile"
+	rm -f "$PANEL_DIR/Caddyfile.new"
+	cat "$OPS/ops-panel.js" > "$PANEL_DIR/www/ops-panel.js"
 
 	: > "$PANEL_DIR/enabled"
 	"$OPS/overlay.sh" apply
-	# A Caddyfile that changed under an edge that was not recreated needs a reload.
-	compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null 2>&1 \
-		|| die "edge refused the panel's Caddyfile - see: docker compose logs edge"
+	# A Caddyfile that changed under an edge that was not recreated needs a reload. Edge may
+	# have just been recreated, its admin API not listening yet, hence the retries.
+	if ! until_ok 10 reload_edge; then
+		compose exec -T edge caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile > /dev/null || true
+		if [ "$had_prev" -eq 1 ]; then
+			cat "$PANEL_DIR/Caddyfile.prev" > "$PANEL_DIR/Caddyfile"
+			rm -f "$PANEL_DIR/Caddyfile.prev"
+			die "edge refused the panel's Caddyfile; the previous copy is back in ops/panel/Caddyfile. The panel is still ON; 'fluxer panel off' removes it."
+		fi
+		rm -f "$PANEL_DIR/enabled" "$PANEL_DIR/Caddyfile.prev"
+		"$OPS/overlay.sh" apply || true
+		die "edge refused the panel's Caddyfile; the panel was switched back off and edge is on upstream's Caddyfile again"
+	fi
+	rm -f "$PANEL_DIR/Caddyfile.prev"
 
-	until_ok 30 route_live || die "edge does not answer /ops-api/health: the route is not live"
-	until_ok 30 script_live || die "edge does not serve /ops-panel.js"
-	until_ok 30 html_loads_panel || die "the served index.html does not load /ops-panel.js"
+	until_ok 30 route_live || die_still_on "edge does not answer /ops-api/health: the route is not live."
+	until_ok 30 script_live || die_still_on "edge does not serve /ops-panel.js."
+	until_ok 30 html_loads_panel || die_still_on "the served index.html does not load /ops-panel.js."
 	echo
 	echo "Ops panel on. Reload the web app, then STAFF menu -> Ops…"
 	echo "(Web app only: the desktop and mobile apps never load this server's index.html.)"
 }
 
+# Bridge first: the part that can run commands goes before anything else. Whatever
+# fails, the switch and the overlay still come off.
 cmd_off() {
 	need_instance
+	rc=0
+	if ! sudo systemctl disable --now "$UNIT" > /dev/null; then
+		echo "panel: could not stop and disable $UNIT - do it by hand: sudo systemctl disable --now $UNIT" >&2
+		rc=1
+	fi
 	rm -f "$PANEL_DIR/enabled"
-	"$OPS/overlay.sh" apply
-	sudo systemctl disable --now "$UNIT" > /dev/null 2>&1 || true
-	echo "Ops panel off: the script, the route and the bridge are gone. Open clients lose it on their next reload."
+	"$OPS/overlay.sh" apply || rc=1
+	if [ "$rc" -eq 0 ]; then
+		echo "Ops panel off: the script, the route and the bridge are gone. Open clients lose it on their next reload."
+	else
+		echo "panel: the panel is switched off but something above failed; check before relying on it." >&2
+	fi
+	return "$rc"
 }
 
 cmd_refresh() {
