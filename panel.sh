@@ -25,8 +25,8 @@ set -eu
 PANEL_DIR="$OPS/panel"
 SOCKET="$PANEL_DIR/run/bridge.sock"
 UNIT=fluxer-ops-bridge
-UNIT_FILE="/etc/systemd/system/$UNIT.service"
-PANEL_TAG='<script src="/ops-panel.js"></script>'
+UNIT_FILE="${PANEL_UNIT_FILE:-/etc/systemd/system/$UNIT.service}"
+# The <script> tag itself is overlay.sh's (PANEL_TAG there, with the nonce placeholder).
 
 die() { printf 'panel: %s\n' "$*" >&2; exit 1; }
 compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
@@ -74,6 +74,9 @@ User=$1
 Group=$2
 SupplementaryGroups=docker
 Environment=FLUXER_DIR=$FLUXER_DIR
+# The panel must never run badge-patch.sh: it recreates app-proxy and edge, far longer
+# than the bridge's 60 s timeout. premium.sh (and gifts.sh, which calls it) honour this.
+Environment=PREMIUM_SKIP_BADGE_PATCH=1
 ExecStart=$3 -I $OPS/ops_bridge.py --socket $SOCKET
 Restart=always
 RestartSec=2
@@ -103,7 +106,8 @@ html_loads_panel() {
 	f=$(mktemp)
 	origin_get / "$f" > /dev/null
 	rc=0
-	grep -qF "$PANEL_TAG" "$f" || rc=$?
+	# The served html carries the real nonce, not the placeholder: match the src only.
+	grep -qF '/ops-panel.js"' "$f" || rc=$?
 	rm -f "$f"
 	return "$rc"
 }
@@ -178,7 +182,8 @@ cmd_on() {
 		fi
 		rm -f "$PANEL_DIR/enabled" "$PANEL_DIR/Caddyfile.prev"
 		"$OPS/overlay.sh" apply || true
-		die "edge refused the panel's Caddyfile; the panel was switched back off and edge is on upstream's Caddyfile again"
+		sudo systemctl disable --now "$UNIT" > /dev/null 2>&1 || true
+		die "edge refused the panel's Caddyfile; the panel was switched back off and the bridge stopped, edge is on upstream's Caddyfile again"
 	fi
 	rm -f "$PANEL_DIR/Caddyfile.prev"
 
@@ -195,7 +200,9 @@ cmd_on() {
 cmd_off() {
 	need_instance
 	rc=0
-	if ! sudo systemctl disable --now "$UNIT" > /dev/null; then
+	if [ ! -f "$UNIT_FILE" ]; then
+		echo "panel: bridge unit not installed; nothing to stop."
+	elif ! sudo systemctl disable --now "$UNIT" > /dev/null; then
 		echo "panel: could not stop and disable $UNIT - do it by hand: sudo systemctl disable --now $UNIT" >&2
 		rc=1
 	fi

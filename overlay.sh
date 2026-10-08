@@ -33,7 +33,7 @@ PANEL_DIR="$OPS/panel"
 OUT_DIR="$OPS/overlay"
 STATIC=/srv/app/static
 ASSET_DIR="$STATIC/assets"
-PANEL_TAG='<script src="/ops-panel.js"></script>'
+PANEL_TAG='<script nonce="{{CSP_NONCE_PLACEHOLDER}}" src="/ops-panel.js"></script>'
 
 die() { printf 'overlay: %s\n' "$*" >&2; exit 1; }
 compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
@@ -48,7 +48,11 @@ badge_on() { [ -s "$PATCH_DIR/patched.names" ] && [ -s "$PATCH_DIR/chunk.name" ]
 # On means enabled AND everything it mounts is there: a missing bind source makes docker
 # create a root-owned directory in its place, and edge then fails to start.
 panel_enabled() { [ -f "$PANEL_DIR/enabled" ]; }
-panel_on() { panel_enabled && [ -f "$PANEL_DIR/Caddyfile" ] && [ -d "$PANEL_DIR/www" ] && [ -d "$PANEL_DIR/run" ]; }
+panel_complete() { [ -f "$PANEL_DIR/Caddyfile" ] && [ -d "$PANEL_DIR/www" ] && [ -d "$PANEL_DIR/run" ]; }
+# The panel's Caddyfile is a copy of upstream's plus a marked block. If upstream's changed
+# since (an update), mounting the copy would pin edge to the old file.
+panel_fresh() { sed '/# >>> fluxer-ops panel/,/# <<< fluxer-ops panel/d' "$PANEL_DIR/Caddyfile" | cmp -s - "$FLUXER_DIR/Caddyfile"; }
+panel_on() { panel_enabled && panel_complete && panel_fresh; }
 
 app_proxy_image() {
 	img=$(compose config --images 2> /dev/null | grep 'fluxer-app-proxy' | head -n 1) || img=''
@@ -150,14 +154,18 @@ cmd_apply() {
 	if panel_on; then
 		panel=1
 	elif panel_enabled; then
-		echo "overlay: the Ops panel is enabled but ops/panel/ is incomplete (Caddyfile, www/ or run/ missing); leaving it out until it is restored (run: fluxer panel refresh)" >&2
+		if panel_complete; then
+			echo "overlay: the Ops panel's Caddyfile was built from an older upstream Caddyfile; leaving the panel out (run: fluxer panel refresh)" >&2
+		else
+			echo "overlay: the Ops panel is enabled but ops/panel/ is incomplete (Caddyfile, www/ or run/ missing); leaving it out until it is restored (run: fluxer panel refresh)" >&2
+		fi
 	fi
 
 	if [ -z "$names" ] && [ "$panel" = 0 ]; then
 		if ours; then
 			rm -f "$OVERRIDE"
 			echo "Nothing to serve on top of the stock app: override removed."
-			compose up -d app-proxy edge
+			compose up -d --no-deps app-proxy edge
 		fi
 		return 0
 	fi
@@ -190,7 +198,7 @@ cmd_apply() {
 	rm -rf "$work"
 	render_override "$names" "$panel" > "$OVERRIDE.new"
 	mv "$OVERRIDE.new" "$OVERRIDE"
-	compose up -d app-proxy edge
+	compose up -d --no-deps app-proxy edge
 	printf 'Client overlay: badge %s, Ops panel %s.\n' \
 		"$([ -n "$names" ] && echo on || echo off)" "$([ "$panel" = 1 ] && echo on || echo off)"
 }
@@ -202,7 +210,7 @@ cmd_suspend() {
 		return 0
 	fi
 	rm -f "$OVERRIDE"
-	compose up -d app-proxy edge
+	compose up -d --no-deps app-proxy edge
 	echo "Override removed: app and edge are stock until 'overlay.sh apply' (features keep their state)."
 }
 

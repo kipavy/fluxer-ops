@@ -111,7 +111,7 @@ Three commands are worth knowing before you need them:
 | `ops_bridge.py` | systemd (`fluxer-ops-bridge`) | Runs allowlisted commands for the Ops panel after checking the session and STAFF. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
-| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, rollback images. |
+| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, the client overlay (override file and its mounts) and the Ops panel (bridge, route, Caddyfile copy), rollback images. |
 | `firewall-fix.sh` | you, once | Diagnoses Docker vs firewalld on this host; `--apply` installs the systemd drop-in that fixes it. |
 | `cf-ips.sh` | you, `doctor.sh` | Compares `FLUXER_EDGE_TRUSTED_PROXIES` with Cloudflare's published ranges; `--apply` rewrites that line. |
 | `users.sh` | you | List and inspect accounts, set STAFF, mark an email verified, instance counts. |
@@ -612,7 +612,8 @@ How it holds together:
   and every argument is checked against a pattern.
 - **Throttling.** Every authenticated request counts against 60 a minute per user,
   checked before the STAFF lookup so a stolen or stale token cannot be used to hammer
-  the database; rejected tokens are cached for the same reason. Writes get a second,
+  the database; rejected tokens are cached for the same reason (for a minute, for every
+  action: a garbage token cannot make the bridge ask the api again, even for a write). Writes get a second,
   tighter limit of 30 a minute, and at most 8 requests run at once (503 beyond that).
 - **Audit.** Every change is logged (`journalctl -u fluxer-ops-bridge | grep audit`)
   and sent through `notify.sh` under the key `ops-panel`. Any STAFF account can use
@@ -624,14 +625,18 @@ How it holds together:
   can be turned off without the other. `premium.sh` finds out whether the badge is
   applied from `ops/patches/patched.names`, not from the compose file.
 - **Going live safely.** `fluxer panel on` checks the new Caddyfile with edge's own
-  Caddy (`caddy adapt`) before it replaces the running one, retries the reload, and
-  puts the old file back if the reload still fails, so a bad route cannot take the
-  site down. `fluxer panel off` stops the bridge first, so the kill switch works even
+  Caddy (`caddy adapt`) before it replaces the running one, retries the reload and,
+  if it still fails, undoes itself: on a refresh the previous
+  Caddyfile copy is put back (the panel stays on); on a first `on` the panel is switched
+  back off and the bridge stopped. Either way a bad route cannot take the site down.
+  `fluxer panel off` stops the bridge first, so the kill switch works even
   if the Caddy step then fails.
 - **Updates and rollback.** `update.sh` takes both off before an update and puts them
   back after (`fluxer panel refresh` rebuilds the Caddyfile copy from upstream's new
   one). `fluxer rollback` does the same: overlay off, roll back, badge and panel back
-  on. `doctor` flags a copy that has drifted from upstream's.
+  on. `doctor` flags a copy that has drifted from upstream's. After a `git pull` that
+  changes `ops-panel.js` or `ops_bridge.py`, run `fluxer panel refresh`: the served
+  script is a copy, and the bridge has to restart to run the new code.
 
 **Web app only.** The desktop and mobile apps never load this server's `index.html`
 (see *Known gaps*), so the panel, like the badge, is not there.

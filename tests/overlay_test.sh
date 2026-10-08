@@ -67,7 +67,7 @@ cat > "$tmp/multi.html" <<'EOF'
 EOF
 out=$(load; insert_panel_tag "$tmp/multi.html")
 assert_contains "tag goes before the first external script" \
-	'<script src="/ops-panel.js"></script><script src="/assets/a.js" type="module">' "$out"
+	'<script nonce="{{CSP_NONCE_PLACEHOLDER}}" src="/ops-panel.js"></script><script src="/assets/a.js" type="module">' "$out"
 assert_eq "tag inserted once" 1 "$(printf '%s\n' "$out" | grep -o 'ops-panel.js' | grep -c .)"
 assert_contains "inline nonce script stays first" '<script nonce="{{CSP_NONCE_PLACEHOLDER}}">window.__X=1</script>' \
 	"$(printf '%s\n' "$out" | sed -n 2p)"
@@ -75,7 +75,7 @@ assert_contains "inline nonce script stays first" '<script nonce="{{CSP_NONCE_PL
 printf '<html><script nonce="n">x</script><script src="/assets/a.js" type="module"></script><script src="/assets/b.js"></script></html>\n' > "$tmp/one.html"
 out=$(load; insert_panel_tag "$tmp/one.html")
 assert_contains "single-line html: before the first external script" \
-	'<script nonce="n">x</script><script src="/ops-panel.js"></script><script src="/assets/a.js"' "$out"
+	'<script nonce="n">x</script><script nonce="{{CSP_NONCE_PLACEHOLDER}}" src="/ops-panel.js"></script><script src="/assets/a.js"' "$out"
 
 printf '<html><script>inline only</script></html>\n' > "$tmp/none.html"
 rc=0; (load; insert_panel_tag "$tmp/none.html" > /dev/null) || rc=$?
@@ -125,7 +125,7 @@ rm -f "$ops/patches/patched.names"
 FLUXER_DIR="$tmp/inst" sh "$ops/overlay.sh" apply > /dev/null
 [ ! -e "$tmp/inst/docker-compose.override.yml" ] && pass "nothing on: our override removed" \
 	|| fail "nothing on: our override removed"
-assert_contains "nothing on: app-proxy and edge recreated stock" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+assert_contains "nothing on: app-proxy and edge recreated stock" "compose up -d --no-deps app-proxy edge" "$(cat "$DOCKER_LOG")"
 
 # --- the composition ----------------------------------------------------------------
 reset_state() {
@@ -141,9 +141,11 @@ badge_state() {
 }
 panel_state() {
 	mkdir -p "$ops/panel/www" "$ops/panel/run"
-	: > "$ops/panel/Caddyfile"
+	# upstream's Caddyfile with the panel's marked block in it, as panel.sh writes it
+	printf 'upstream-1\n# >>> fluxer-ops panel (ops/panel.sh)\nroutes\n# <<< fluxer-ops panel\nupstream-2\n' > "$ops/panel/Caddyfile"
 	: > "$ops/panel/enabled"
 }
+printf 'upstream-1\nupstream-2\n' > "$tmp/inst/Caddyfile"
 run_overlay() { FLUXER_DIR="$tmp/inst" sh "$ops/overlay.sh" "$@"; }
 
 # stale when a non-patched asset named by the patched index.html is gone from the image
@@ -166,10 +168,10 @@ assert_contains "badge+panel: Caddyfile mounted" "$ops/panel/Caddyfile:/etc/cadd
 html=$(cat "$ops/overlay/index.html")
 assert_contains "badge+panel: badge's repointed content" "badge-repointed" "$html"
 assert_contains "badge+panel: panel tag before the first external script" \
-	'<script src="/ops-panel.js"></script><script src="/assets/entry.js"' "$html"
+	'<script nonce="{{CSP_NONCE_PLACEHOLDER}}" src="/ops-panel.js"></script><script src="/assets/entry.js"' "$html"
 assert_eq "badge+panel: .br written" "$html" "$(cat "$ops/overlay/index.html.br")"
 assert_eq "badge+panel: .gz written" "$html" "$(cat "$ops/overlay/index.html.gz")"
-assert_contains "badge+panel: services recreated" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+assert_contains "badge+panel: services recreated" "compose up -d --no-deps app-proxy edge" "$(cat "$DOCKER_LOG")"
 
 # (b) stale badge + panel
 reset_state; badge_state; panel_state
@@ -181,7 +183,7 @@ assert_contains "stale badge + panel: edge section" "  edge:" "$o"
 html=$(cat "$ops/overlay/index.html")
 assert_contains "stale badge + panel: built from the stock html" "stock-entry.js" "$html"
 assert_contains "stale badge + panel: tag before the first external script" \
-	'<script src="/ops-panel.js"></script><script src="/assets/stock-entry.js"' "$html"
+	'<script nonce="{{CSP_NONCE_PLACEHOLDER}}" src="/ops-panel.js"></script><script src="/assets/stock-entry.js"' "$html"
 case "$html" in *badge-repointed*) fail "stale badge + panel: old badge html not used" ;; *) pass "stale badge + panel: old badge html not used" ;; esac
 
 # panel enabled but its files are gone: left out, never mounted
@@ -201,13 +203,26 @@ for missing in www run; do
 		|| fail "panel without $missing/: no override"
 done
 
+# the panel's Caddyfile copy was built from an older upstream Caddyfile: left out, never mounted
+reset_state; badge_state; panel_state
+printf 'upstream-1\nupstream-CHANGED\n' > "$tmp/inst/Caddyfile"
+err=$(run_overlay apply 2>&1 > /dev/null)
+assert_contains "stale panel copy: warned" "built from an older upstream Caddyfile; leaving the panel out (run: fluxer panel refresh)" "$err"
+o=$(cat "$tmp/inst/docker-compose.override.yml")
+case "$o" in *"edge:"*) fail "stale panel copy: no edge section" ;; *) pass "stale panel copy: no edge section" ;; esac
+assert_contains "stale panel copy: badge still served" "$ops/patches/c.1.js:" "$o"
+case "$(cat "$ops/overlay/index.html")" in *ops-panel.js*) fail "stale panel copy: no panel tag" ;; *) pass "stale panel copy: no panel tag" ;; esac
+printf 'upstream-1\nupstream-2\n' > "$tmp/inst/Caddyfile"
+run_overlay apply > /dev/null 2>&1
+assert_contains "fresh panel copy: edge section" "  edge:" "$(cat "$tmp/inst/docker-compose.override.yml")"
+
 # (c) suspend
 reset_state; badge_state; panel_state
 run_overlay apply > /dev/null
 : > "$DOCKER_LOG"
 run_overlay suspend > /dev/null
 [ ! -e "$tmp/inst/docker-compose.override.yml" ] && pass "suspend removes our override" || fail "suspend removes our override"
-assert_contains "suspend recreates app-proxy and edge" "compose up -d app-proxy edge" "$(cat "$DOCKER_LOG")"
+assert_contains "suspend recreates app-proxy and edge" "compose up -d --no-deps app-proxy edge" "$(cat "$DOCKER_LOG")"
 [ -f "$ops/panel/enabled" ] && [ -s "$ops/patches/patched.names" ] && pass "suspend keeps every feature's state" \
 	|| fail "suspend keeps every feature's state"
 printf 'services:\n  web: {}\n' > "$tmp/inst/docker-compose.override.yml"

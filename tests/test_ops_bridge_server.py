@@ -248,11 +248,19 @@ class Identity(unittest.TestCase):
         self.assertIsNone(ident.whoami('t'))
         self.assertIsNone(ident.whoami('t'))
         self.assertEqual(len(self.fetched), 1)
-        self.assertIsNone(ident.whoami('t', fresh=True))
-        self.assertEqual(len(self.fetched), 2)
         self.now[0] = 61.0
         self.assertIsNone(ident.whoami('t'))
-        self.assertEqual(len(self.fetched), 3)
+        self.assertEqual(len(self.fetched), 2)
+
+    def test_garbage_token_with_a_write_asks_the_api_once_within_the_ttl(self):
+        ident = self.make([(401, b'{}')] * 3)
+        self.assertIsNone(ident.whoami('junk', fresh=True))
+        self.assertIsNone(ident.whoami('junk', fresh=True))
+        self.assertIsNone(ident.whoami('junk', fresh=True))
+        self.assertEqual(len(self.fetched), 1)
+        self.now[0] = 61.0
+        self.assertIsNone(ident.whoami('junk', fresh=True))
+        self.assertEqual(len(self.fetched), 2)
 
     def test_odd_answers_are_upstream_errors(self):
         for answer in ((500, b''), (200, b'not json'), (200, b'{"username": "x"}'), (200, b'{"id": "12; drop"}')):
@@ -352,6 +360,39 @@ class Transport(unittest.TestCase):
                     self.assertTrue(data.startswith(b'HTTP/1.1 400'), (value, data))
                     self.assertIn(b'bad Content-Length', data)
             finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_oversized_body_is_413_and_timeout_is_set(self):
+        self.assertEqual(ob._Handler.timeout, 15)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'b.sock')
+            srv = ob.serve(path, ob.Bridge(FakeIdentity(), DOMAIN, ops=tmp))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                req = f'POST /run HTTP/1.1\r\nHost: b\r\nContent-Length: {ob.MAX_BODY + 1}\r\n\r\n'.encode()
+                self.assertTrue(self._raw(path, req).startswith(b'HTTP/1.1 413'))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def test_a_request_still_sending_its_body_holds_no_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, 'b.sock')
+            srv = ob.serve(path, ob.Bridge(FakeIdentity(), DOMAIN, ops=tmp))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                s.connect(path)
+                s.sendall(b'POST /run HTTP/1.1\r\nHost: b\r\nContent-Length: 50\r\n\r\n{')
+                time.sleep(0.3)
+                slots = srv.RequestHandlerClass.slots
+                for _ in range(ob.MAX_CONCURRENT):
+                    self.assertTrue(slots.acquire(blocking=False))
+                for _ in range(ob.MAX_CONCURRENT):
+                    slots.release()
+            finally:
+                s.close()
                 srv.shutdown()
                 srv.server_close()
 

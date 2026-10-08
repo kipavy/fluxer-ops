@@ -309,11 +309,12 @@ class Identity:
         # Keyed by a hash: the bridge never keeps a token it does not need to.
         key = hashlib.sha256(token.encode()).hexdigest()
         now = self.clock()
-        if not fresh:
-            with self._lock:
-                hit = self._cache.get(key)
-            if hit and hit[0] > now:
-                return hit[1]  # None: the api rejected this token a moment ago
+        with self._lock:
+            hit = self._cache.get(key)
+        if hit and hit[0] > now and (not fresh or hit[1] is None):
+            # None: the api rejected this token a moment ago, and it stays rejected for the
+            # ttl even for a write (fresh only re-asks about tokens that were valid).
+            return hit[1]
         status, body = self._fetch(token)
         if status in (401, 403):
             # Remembered too, so a loop of bad tokens cannot make the bridge call the api each time.
@@ -439,6 +440,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     bridge = None
     server_version = 'fluxer-ops-bridge'
     protocol_version = 'HTTP/1.1'
+    timeout = 15  # applied to the socket: a slow client cannot hold a connection
 
     slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 
@@ -452,19 +454,28 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _serve(self):
+        # The body is read before a slot is taken: only a request that has sent all of it
+        # occupies one of the MAX_CONCURRENT slots.
+        raw = (self.headers.get('Content-Length') or '0').strip()
+        if not (raw.isascii() and raw.isdigit()):
+            self.close_connection = True
+            return self._reply(400, {'error': 'bad Content-Length'})
+        length = int(raw)
+        if length > MAX_BODY:
+            self.close_connection = True
+            return self._reply(413, {'error': 'request too large'})
+        try:
+            body = self.rfile.read(length) if length else b''
+        except OSError:  # includes the read timeout
+            self.close_connection = True
+            return
+        if len(body) < length:
+            self.close_connection = True
+            return
         if not self.slots.acquire(blocking=False):
             self.close_connection = True
             return self._reply(503, {'error': 'bridge busy; try again'})
         try:
-            raw = (self.headers.get('Content-Length') or '0').strip()
-            if not (raw.isascii() and raw.isdigit()):
-                self.close_connection = True
-                return self._reply(400, {'error': 'bad Content-Length'})
-            length = int(raw)
-            if length > MAX_BODY:
-                self.close_connection = True
-                return self._reply(413, {'error': 'request too large'})
-            body = self.rfile.read(length) if length else b''
             try:
                 status, payload = self.bridge.handle(self.command, self.path, self.headers, body)
             except Exception:  # never let one request take the bridge down

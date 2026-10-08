@@ -45,6 +45,7 @@ assert_contains "may use docker" "SupplementaryGroups=docker" "$unit"
 assert_contains "can never sudo" "NoNewPrivileges=yes" "$unit"
 assert_contains "isolated python, socket in ops/panel/run" \
 	"ExecStart=/usr/bin/python3 -I $tmp/inst/ops/ops_bridge.py --socket $tmp/inst/ops/panel/run/bridge.sock" "$unit"
+assert_contains "the bridge never reaches badge-patch.sh" "Environment=PREMIUM_SKIP_BADGE_PATCH=1" "$unit"
 assert_contains "knows the instance" "Environment=FLUXER_DIR=$tmp/inst" "$unit"
 
 # The switch, with stubs for sudo, docker, curl and id on PATH and a stub overlay.sh:
@@ -61,6 +62,7 @@ cat > "$bin/docker" <<'STUB'
 #!/bin/sh
 echo "docker $*" >> "$STUB_LOG"
 case "$*" in *adapt*) [ ! -f "$STUB_DIR/fail_adapt" ] || { echo "adapt: boom" >&2; exit 1; } ;; esac
+case "$*" in *reload*) [ ! -f "$STUB_DIR/fail_reload" ] || exit 1 ;; esac
 exit 0
 STUB
 cat > "$bin/curl" <<'STUB'
@@ -83,6 +85,9 @@ echo '// stub' > "$tmp/inst/ops/ops-panel.js"
 mkdir -p "$tmp/inst/ops/panel"
 : > "$tmp/inst/ops/panel/enabled"
 export STUB_LOG="$log" STUB_DIR="$tmp"
+# The bridge unit "installed": off only talks to systemd when the unit file exists.
+export PANEL_UNIT_FILE="$tmp/fluxer-ops-bridge.service"
+: > "$PANEL_UNIT_FILE"
 
 : > "$log"
 rc=0; (PATH="$bin:$PATH"; load; cmd_off > /dev/null 2>&1) || rc=$?
@@ -107,5 +112,22 @@ assert_contains "on: edge's error is shown" "adapt: boom" "$err"
 	&& pass "on: failed adapt changed nothing" || fail "on: failed adapt changed nothing"
 case "$(cat "$log")" in *systemctl*|*overlay*) fail "on: failed adapt touched systemd or overlay" ;; *) pass "on: failed adapt touched no service" ;; esac
 rm -f "$tmp/fail_adapt"
+
+# off with no unit installed: no systemctl at all, no failure
+mv "$PANEL_UNIT_FILE" "$tmp/unit.hidden"; : > "$tmp/inst/ops/panel/enabled"; : > "$tmp/fail_systemctl"; : > "$log"
+rc=0; out=$( (PATH="$bin:$PATH"; load; cmd_off) 2>&1) || rc=$?
+assert_eq "off: no unit installed -> exit 0 even if systemctl would fail" 0 "$rc"
+assert_contains "off: says the unit is not installed" "bridge unit not installed" "$out"
+assert_eq "off: no unit installed -> systemctl not called" "overlay apply" "$(cat "$log")"
+rm -f "$tmp/fail_systemctl"; mv "$tmp/unit.hidden" "$PANEL_UNIT_FILE"
+
+# first on: edge refuses the Caddyfile at reload -> panel back off AND the bridge stopped
+rm -f "$tmp/inst/ops/panel/enabled" "$tmp/inst/ops/panel/Caddyfile"; : > "$tmp/fail_reload"; : > "$log"
+rc=0; err=$( (PATH="$bin:$PATH"; load; cmd_on) 2>&1 >/dev/null) || rc=$?
+assert_eq "on: first-on reload failure -> non-zero" 1 "$rc"
+assert_contains "on: first-on reload failure: message says the bridge stopped" "switched back off and the bridge stopped" "$err"
+assert_eq "on: first-on reload failure: bridge disabled last" "sudo systemctl disable --now fluxer-ops-bridge" "$(grep '^sudo' "$log" | tail -n 1)"
+[ ! -f "$tmp/inst/ops/panel/enabled" ] && pass "on: first-on reload failure: switch removed" || fail "on: first-on reload failure: switch removed"
+rm -f "$tmp/fail_reload"
 
 finish

@@ -46,8 +46,6 @@ Accounts
   fluxer gifts ...           Plutonium gift codes and links, lifetime included (fluxer gifts --help)
   fluxer badge-patch         Re-apply just the client-side Visionary badge patch
              [--revert]      Drop it and go back to the stock bundle
-  fluxer panel on | off | status | refresh
-                             In-app STAFF Ops panel (web app only): gifts, premium, users, health
 
 Backups
   fluxer backup              Take a backup now (and push it off-site, if configured)
@@ -67,6 +65,8 @@ Host
   fluxer firewall-fix [--apply | --revert]
                              Stop firewalld restarts from wiping Docker's chains
   fluxer setup [--check]     Install or re-check: prerequisites, instance, cron, extras
+  fluxer panel on | off | status | refresh
+                             In-app STAFF Ops panel (web app only): gifts, premium, users, health
 
   fluxer help                This text
 USAGE
