@@ -362,6 +362,32 @@ check_badge_patch() {
 	fi
 }
 
+# The Ops panel: the bridge answers, and the Caddyfile copy is still upstream's plus
+# our marked block. Upstream may change its Caddyfile on any update; a stale copy
+# would silently drop whatever the new one adds.
+check_panel() {
+	if [ ! -f "$OPS/panel/enabled" ]; then
+		ok "Ops panel off"
+		return
+	fi
+	if ! have curl; then
+		skip "Ops panel (no curl)"
+		return
+	fi
+	if curl -s --max-time 3 --unix-socket "$OPS/panel/run/bridge.sock" http://bridge/health 2> /dev/null \
+		| grep -q '"ok": *true'; then
+		ok "Ops panel bridge answers"
+	else
+		fail "Ops panel is on but the bridge does not answer" "journalctl -u fluxer-ops-bridge -n 50; fluxer panel refresh"
+	fi
+	if sed '/# >>> fluxer-ops panel/,/# <<< fluxer-ops panel/d' "$OPS/panel/Caddyfile" 2> /dev/null \
+		| cmp -s - "$FLUXER_DIR/Caddyfile"; then
+		ok "Ops panel Caddyfile is upstream's plus the /ops-api route"
+	else
+		fail "upstream's Caddyfile changed since the Ops panel copied it" "fluxer panel refresh"
+	fi
+}
+
 # Days until the certificate served at $1 (host:port) for SNI $2 expires.
 cert_days() {
 	end=$(echo | timeout 15 openssl s_client -connect "$1" -servername "$2" 2> /dev/null \
@@ -445,6 +471,7 @@ check_notify
 check_cf_ips
 check_overlay
 check_badge_patch
+check_panel
 check_tls
 check_rollback_images
 

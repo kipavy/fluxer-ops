@@ -46,6 +46,8 @@ Accounts
   fluxer gifts ...           Plutonium gift codes and links, lifetime included (fluxer gifts --help)
   fluxer badge-patch         Re-apply just the client-side Visionary badge patch
              [--revert]      Drop it and go back to the stock bundle
+  fluxer panel on | off | status | refresh
+                             In-app STAFF Ops panel (web app only): gifts, premium, users, health
 
 Backups
   fluxer backup              Take a backup now (and push it off-site, if configured)
@@ -297,11 +299,17 @@ cmd_rollback() {
 				"$OPS/badge-patch.sh" \
 					|| echo "WARNING: the badge patch did not re-apply. Run: fluxer badge-patch" >&2
 			fi
-			# Whatever the badge did, put back what is still on.
-			"$OPS/overlay.sh" apply \
-				|| echo "WARNING: the client overlay did not re-apply. Run: ops/overlay.sh apply" >&2
+			if [ -f "$OPS/panel/enabled" ]; then
+				# Rebuilds the Caddyfile copy from the Caddyfile now in place, restarts the bridge, re-applies.
+				"$OPS/panel.sh" refresh \
+					|| echo "WARNING: the Ops panel did not re-apply. Run: fluxer panel refresh" >&2
+			else
+				# Whatever the badge did, put back what is still on.
+				"$OPS/overlay.sh" apply \
+					|| echo "WARNING: the client overlay did not re-apply. Run: ops/overlay.sh apply" >&2
+			fi
 		else
-			echo "The client overlay is OFF (badge patch / Ops panel). Re-apply with 'ops/overlay.sh apply' once this is sorted." >&2
+			echo "The client overlay is OFF (badge patch / Ops panel). Re-apply with 'ops/overlay.sh apply' and/or 'fluxer panel refresh' once this is sorted." >&2
 		fi
 	fi
 	return "$rc"
@@ -322,6 +330,7 @@ case "$cmd" in
 	premium) exec "$OPS/premium.sh" "$@" ;;
 	gifts | gift) exec "$OPS/gifts.sh" "$@" ;;
 	badge-patch) exec "$OPS/badge-patch.sh" "$@" ;;
+	panel) exec "$OPS/panel.sh" "$@" ;;
 	backup) exec "$OPS/backup.sh" "$@" ;;
 	backups) cmd_backups ;;
 	verify-backup | verify) cmd_verify_backup ;;

@@ -150,7 +150,7 @@ cmd_apply() {
 	if panel_on; then
 		panel=1
 	elif panel_enabled; then
-		echo "overlay: the Ops panel is enabled but ops/panel/ is incomplete (Caddyfile, www/ or run/ missing); leaving it out until it is restored" >&2
+		echo "overlay: the Ops panel is enabled but ops/panel/ is incomplete (Caddyfile, www/ or run/ missing); leaving it out until it is restored (run: fluxer panel refresh)" >&2
 	fi
 
 	if [ -z "$names" ] && [ "$panel" = 0 ]; then

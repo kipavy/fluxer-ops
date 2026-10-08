@@ -96,6 +96,17 @@ for t in tests/*_test.sh; do
 	fi
 done
 
+# 8. The Ops panel bridge's unit tests (python3 stdlib only, no instance needed).
+if command -v python3 > /dev/null 2>&1; then
+	if out=$(python3 -m unittest discover -s tests -p 'test_*.py' 2>&1); then
+		ok "bridge unit tests"
+	else
+		fail "bridge unit tests:"; printf '%s\n' "$out" | tail -n 30 | sed 's/^/      /'
+	fi
+else
+	fail "python3 is missing: the Ops panel bridge needs it"
+fi
+
 if [ "$LINT" -eq 1 ]; then
 	# shellcheck disable=SC2086 # $scripts is a list of plain file names
 	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts lib.sh lib-node.sh tests/*.sh 2>&1); then

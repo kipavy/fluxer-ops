@@ -91,8 +91,13 @@ reapply_overlay() {
 	if [ "$BADGE_ON" -eq 1 ]; then
 		"$OPS/badge-patch.sh" || echo "WARNING: the badge patch did not re-apply. Run: fluxer badge-patch" >&2
 	fi
-	# Whatever the badge did, put back what is still on (badge-patch.sh already did if it ran).
-	"$OPS/overlay.sh" apply || echo "WARNING: the client overlay did not re-apply. Run: ops/overlay.sh apply" >&2
+	if [ -f "$OPS/panel/enabled" ]; then
+		# Rebuilds the Caddyfile copy from the new upstream one, restarts the bridge, re-applies.
+		"$OPS/panel.sh" refresh || echo "WARNING: the Ops panel did not re-apply. Run: fluxer panel refresh" >&2
+	else
+		# Whatever the badge did, put back what is still on (badge-patch.sh already did if it ran).
+		"$OPS/overlay.sh" apply || echo "WARNING: the client overlay did not re-apply. Run: ops/overlay.sh apply" >&2
+	fi
 }
 
 # 6. Apply, then prove it actually works.
@@ -118,7 +123,7 @@ else
 	# Deliberately not re-applied: patching a half-updated stack is worse than
 	# running unpatched, and unpatched is a working app without the badge.
 	if [ "$OVERLAID" -eq 1 ]; then
-		echo "The client overlay is OFF (badge patch / Ops panel). Re-apply with 'ops/overlay.sh apply' once this is sorted." >&2
+		echo "The client overlay is OFF (badge patch / Ops panel). Re-apply with 'ops/overlay.sh apply' and/or 'fluxer panel refresh' once this is sorted." >&2
 	fi
 	exit 1
 fi
