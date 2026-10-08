@@ -52,7 +52,6 @@ set -eu
 
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 need_instance
-OVERRIDE="$FLUXER_DIR/docker-compose.override.yml"
 PG_CONTAINER=${PG_CONTAINER:-}
 
 # PremiumFlags, from packages/constants/src/UserConstants.ts.
@@ -168,7 +167,7 @@ SQL
 }
 
 badge_patch_applied() {
-	[ -f "$OVERRIDE" ] && head -n 1 "$OVERRIDE" | grep -q 'badge-patch.sh'
+	[ -s "$OPS/patches/patched.names" ]
 }
 
 ensure_badge_patch() {

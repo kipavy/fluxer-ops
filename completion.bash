@@ -32,7 +32,7 @@ _fluxer() {
 
 	if [ "$COMP_CWORD" -eq 1 ]; then
 		words='status check doctor errors top voice logs up down ps restart psql valkey sh
-			changelog update rollback prune users premium gifts badge-patch
+			changelog update rollback prune users premium gifts badge-patch panel
 			backup backups verify-backup restore offsite
 			notify disk env cf-ips firewall-fix install-host setup help'
 	else
@@ -48,6 +48,7 @@ _fluxer() {
 			restore) words=$(_fluxer_backups) ;;
 			premium) words='--duration --subscriber --off --list --repair' ;;
 			badge-patch) words='--revert' ;;
+			panel) [ "$COMP_CWORD" -eq 2 ] && words='on off status refresh' ;;
 			cf-ips) words='--apply --quiet --yes' ;;
 			firewall-fix) words='--apply --revert --installed --test --yes' ;;
 			disk) words='--json --record' ;;
