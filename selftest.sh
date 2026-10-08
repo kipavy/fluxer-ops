@@ -23,9 +23,9 @@ ok() { printf 'ok    %s\n' "$*"; }
 fail() { fails=$((fails + 1)); printf 'FAIL  %s\n' "$*"; }
 
 cd "$OPS"
-# lib.sh is sourced, not run: it must parse, but it is not a command.
-scripts=$(ls ./*.sh fluxer | sed 's|^\./||' | grep -vx 'lib.sh')
-sh -n lib.sh 2>/dev/null || fail "lib.sh does not parse"
+# lib.sh and lib-node.sh are sourced, not run: they must parse, but are not commands.
+scripts=$(ls ./*.sh fluxer | sed 's|^\./||' | grep -vxE 'lib(-node)?\.sh')
+for lib in lib.sh lib-node.sh; do sh -n "$lib" 2>/dev/null || fail "$lib does not parse"; done
 
 # 1. Every script parses and is executable.
 for f in $scripts; do
@@ -82,7 +82,7 @@ hard=$(grep -l '/home/ubuntu' ./*.sh fluxer completion.bash ./*.example 2>/dev/n
 	| sed 's|^\./||' | grep -vx 'selftest.sh' || true)
 [ -z "$hard" ] && ok "no hardcoded /home/ubuntu paths" || fail "hardcoded /home/ubuntu in: $hard"
 nolib=$(for f in $(grep -l 'FLUXER_DIR' ./*.sh fluxer | sed 's|^\./||'); do
-	case "$f" in lib.sh | get.sh | selftest.sh) continue ;; esac
+	case "$f" in lib.sh | lib-node.sh | get.sh | selftest.sh) continue ;; esac
 	grep -q '/lib\.sh"' "$f" || printf '%s ' "$f"
 done)
 [ -z "$nolib" ] && ok "every script that needs the instance sources lib.sh" || fail "does not source lib.sh: $nolib"
@@ -98,7 +98,7 @@ done
 
 if [ "$LINT" -eq 1 ]; then
 	# shellcheck disable=SC2086 # $scripts is a list of plain file names
-	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts lib.sh tests/*.sh 2>&1); then
+	if out=$(docker run --rm -v "$OPS:/mnt:ro" -w /mnt koalaman/shellcheck:stable -S warning $scripts lib.sh lib-node.sh tests/*.sh 2>&1); then
 		ok "shellcheck clean (warnings and above)"
 	else
 		fail "shellcheck:"; printf '%s\n' "$out" | sed 's/^/      /'
