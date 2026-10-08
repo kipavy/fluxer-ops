@@ -649,6 +649,16 @@ fluxer restore /tmp/r/backup
 - **No alert channel configured**, so alerting is wired but silent.
 - **The firewalld fix is written but not applied** (`fluxer firewall-fix --apply`).
 - The **uploads** half of a restore has never been run end to end.
+- **Client-side changes reach the web app only.** Anything this repository patches
+  into the client (the Visionary badge today) is served through this instance's
+  `index.html`, which only the browser loads. The desktop app renders from its own
+  signed `fluxer_renderer` module (from `pkgs.fluxer.com`), or from a renderer bundled
+  in the app when an instance turns modules off, so it never runs code from this
+  server; the mobile apps ship their own client too. The same goes for **custom
+  sounds**: the client keeps them in its local IndexedDB (`FluxerCustomSounds`) and
+  upstream does not sync them, so they cannot be pushed to an account from here and
+  stay a per-device install. Revisit this if upstream starts syncing custom sounds or
+  lets an instance serve the desktop renderer.
 
 ## Off-site backups
 
