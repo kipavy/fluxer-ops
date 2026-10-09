@@ -121,14 +121,20 @@ system = ("Tu résumes une mise à jour de Fluxer (messagerie type Discord) pour
           "ne concerne que l\u2019app desktop, la CI ou l\u2019instance officielle hébergée. N\u2019invente rien "
           "qui ne soit pas dans le changelog. Pas de titre ni d\u2019introduction : seulement des "
           "lignes commençant par « - ».")
-body = {"model": os.environ["MODEL"], "max_tokens": 400, "temperature": 0.2,
+# Reasoning off: left on, it spends the whole token budget thinking on a long
+# changelog and the answer comes back empty (seen with claude-haiku-5.5).
+body = {"model": os.environ["MODEL"], "max_tokens": 800, "temperature": 0.2,
+        "reasoning": {"enabled": False},
         "messages": [{"role": "system", "content": system},
                      {"role": "user", "content": sys.stdin.read()[:20000]}]}
 req = urllib.request.Request("https://openrouter.ai/api/v1/chat/completions", json.dumps(body).encode(),
                              {"Content-Type": "application/json", "Authorization": "Bearer " + os.environ["KEY"],
                               "X-Title": "fluxer-ops autoupdate"})
-text = json.load(urllib.request.urlopen(req, timeout=60))["choices"][0]["message"]["content"]
-print("\n".join(l for l in text.strip().splitlines() if l.strip())[:1500])
+text = json.load(urllib.request.urlopen(req, timeout=60))["choices"][0]["message"].get("content") or ""
+lines = [l for l in text.strip().splitlines() if l.strip().startswith(("-", "*", "•"))]
+if not lines:
+    sys.exit(1)
+print("\n".join(lines)[:1500])
 ' 2> /dev/null || log "AI summary skipped (OpenRouter call failed)"
 }
 
