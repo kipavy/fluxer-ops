@@ -8,8 +8,10 @@
 # Nothing new, which is most nights: nothing happens. Something new:
 # changelog.sh --summary, then update.sh --yes (overlay off and back on, health
 # checks), then the changelog goes to a channel (AUTOUPDATE_WEBHOOK_URL), in
-# French, optionally headed by a short summary from a cheap model on OpenRouter
-# (AUTOUPDATE_OPENROUTER_KEY), and a failure goes to notify.sh as well. After a failure, automatic updates PAUSE until `on` is
+# French: a short visible part (versions, and a summary from a cheap model on
+# OpenRouter if AUTOUPDATE_OPENROUTER_KEY is set, else the heads-up section),
+# the full changelog folded in spoilers below it. A failure, a check that cannot
+# run, and a new major tag are posted unfolded, and failures go to notify.sh too. After a failure, automatic updates PAUSE until `on` is
 # run again: retrying every night on a broken stack helps nobody.
 #
 # Not followed automatically: a new major image tag (v1 -> v2). It is announced
@@ -75,37 +77,20 @@ live_version() {
 		| sed -n 's/^[Xx]-[Ff]luxer-[Vv]ersion: *//p' | tr -d '\r' | grep . || echo unknown
 }
 
-# Post a message (stdin) to the changelog channel. Long messages are split under
-# the 2000-character limit, closing and reopening a ``` block across the cut.
-# Best effort: never fails its caller.
+# Post a message (stdin) to the changelog channel; `post hidden` folds it into
+# block spoilers (webhook_post.py splits it under the size limit either way).
+# Best effort: never fails its caller. Message ids go to $STATE/posted, so a
+# post can be found again to edit or delete.
 post() {
 	[ -n "$AUTOUPDATE_WEBHOOK_URL" ] || { cat > /dev/null; return 0; }
 	if [ -n "$POST" ]; then
-		$POST || log "posting to the channel failed"
+		$POST "${1:-}" || log "posting to the channel failed"
 		return 0
 	fi
-	# The URL is a credential: through the environment, not argv (ps shows argv).
-	WEBHOOK="$AUTOUPDATE_WEBHOOK_URL" python3 -c '
-import json, os, sys, time, urllib.request
-text, limit, chunks, cur, fence = sys.stdin.read(), 1900, [], "", False
-for line in text.splitlines():
-    line = line[:limit - 10]
-    if len(cur) + len(line) + 5 > limit:
-        chunks.append(cur + ("```" if fence else ""))
-        cur = "```\n" if fence else ""
-    cur += line + "\n"
-    if line.startswith("```"):
-        fence = not fence
-chunks.append(cur)
-if len(chunks) > 5:
-    chunks = chunks[:5]
-    chunks[-1] += ("```\n" if fence else "") + "(cut here: run `fluxer changelog` for the rest)"
-for c in chunks:
-    req = urllib.request.Request(os.environ["WEBHOOK"], json.dumps({"content": c}).encode(),
-                                 {"Content-Type": "application/json", "User-Agent": "fluxer-ops"})
-    urllib.request.urlopen(req, timeout=15).read()
-    time.sleep(1)
-' || log "posting to the channel failed"
+	mkdir -p "$STATE"
+	ids=$(WEBHOOK="$AUTOUPDATE_WEBHOOK_URL" python3 "$OPS/webhook_post.py" ${1:+--$1} 2>> "$STATE/log") \
+		|| log "posting to the channel failed"
+	[ -z "${ids:-}" ] || printf '%s\n' "$ids" | sed "s/^/$(stamp) /" >> "$STATE/posted"
 }
 
 # A few French bullets from the changelog (stdin), or nothing. Optional and best
@@ -332,8 +317,19 @@ cmd_run() {
 		log "$msg"
 		[ "$dry" -eq 1 ] && { echo "$msg" >&2; return 1; }
 		$NOTIFY alert autoupdate "$msg" || true
+		# Once when it starts failing, not every night it stays broken.
+		if [ ! -e "$STATE/check-failing" ]; then
+			printf '%s\n' "$msg" > "$STATE/check-failing"
+			printf '**⚠️ Vérification des mises à jour impossible** sur %s\n%s\n%s\n' \
+				"$(env_value FLUXER_DOMAIN)" "\`$(tr '\n' ' ' < "$STATE/detect.err")\`" \
+				"Aucune mise à jour appliquée. Nouvel essai chaque nuit, sans nouveau message jusqu'au retour à la normale." | post
+		fi
 		record "could not check"
 		return 1
+	fi
+	if [ "$dry" -eq 0 ] && [ -e "$STATE/check-failing" ]; then
+		rm -f "$STATE/check-failing"
+		printf '✅ Vérification des mises à jour rétablie sur %s.\n' "$(env_value FLUXER_DOMAIN)" | post
 	fi
 	if [ "$rc" -eq 1 ]; then
 		[ "$dry" -eq 1 ] && { echo "Nothing new: no update to apply."; return 0; }
@@ -368,9 +364,17 @@ cmd_run() {
 			[ "$images" -eq 0 ] || trigger="$images nouvelle(s) image(s)"
 			[ -z "$files" ] || trigger="${trigger:+$trigger, }modifié : ${files% }"
 			printf '_Déclencheur : %s_\n\n' "$trigger"
-			if [ -s "$t/ai" ]; then printf '**En bref**\n'; cat "$t/ai"; printf '\n'; fi
-			cat "$t/changelog"
+			# Visible: the summary, or without one the heads-up section (breaking
+			# changes, reverts, removals), which should not need a click.
+			if [ -s "$t/ai" ]; then
+				printf '**En bref**\n'; cat "$t/ai"; printf '\n'
+			else
+				awk '/^\*\*⚠️ À noter/ { f = 1 } f && /^$/ { exit } f' "$t/changelog"
+				printf '\n'
+			fi
+			printf '_Détails ci-dessous : clique pour afficher._\n'
 		} | post
+		post hidden < "$t/changelog"
 		log "updated: $before -> $after"
 		record "updated ($before -> $after)"
 		$NOTIFY ok autoupdate || true

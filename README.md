@@ -123,6 +123,7 @@ Three commands are worth knowing before you need them:
 | `env.sh` | you | `keys`/`get`/`set`/`diff` on `.env`; secrets masked, backup before every change. |
 | `changelog.sh` | you, before updating; `autoupdate.sh` (`--summary`) | Per-component running version vs what `v1` points at now, and the commits in between. `--summary`: the same as chat markdown, commits grouped by `changelog_fmt.py`. |
 | `changelog_fmt.py` | `changelog.sh --summary` | Conventional Commit subjects into heads-up / new / fixes; CI, i18n, tests, docs and desktop-only commits counted, not listed. |
+| `webhook_post.py` | `autoupdate.sh` | Posts to a Fluxer/Discord webhook, split under the size limit; `--hidden` folds each message in a block spoiler. |
 | `registry.py` | `changelog.sh`, `autoupdate.sh` | Anonymous registry client: what a tag points at (digest, version, revision), and a repository's tags. |
 | `setup.sh` | you, or `get.sh` | Prerequisites, the instance (installing it if needed), the `fluxer` symlink, completion, cron jobs, optional extras. Idempotent; `--check` only reports. |
 | `get.sh` | `curl \| sh` | Clones this repository next to the instance and runs `setup.sh`. |
@@ -321,14 +322,20 @@ winter time need no crontab edit. 05:00 in Paris is 03:00 UTC in summer, when
 lock keeps two runs from overlapping.
 
 **What you hear.** With `AUTOUPDATE_WEBHOOK_URL` set in `notify.conf` (a Fluxer or
-Discord channel webhook), each applied update is posted there, in French: the
-version before and after, what triggered it, then `fluxer changelog --summary`
-taken just before the update -- each component's old and new version, and the
+Discord channel webhook), each applied update is posted there, in French. What
+shows is short: the version before and after, what triggered it, and *En bref*
+(below) -- or, without it, the *À noter* section. The full changelog follows,
+folded in block spoilers (`||` lines) that open on a click: `fluxer changelog
+--summary` taken just before the update -- each component's old and new version, and the
 commits grouped by `changelog_fmt.py` into *À noter* (breaking, reverts,
 removals), *Nouveautés* (`feat`) and *Corrections* (`fix`, `perf`). CI, i18n
 refreshes, tests, docs, refactors and desktop-only commits, a third of a typical
 update, are counted rather than listed, and one compare link covers the lot.
-Long posts are split across messages.
+Long posts are split across messages by `webhook_post.py`, which keeps code
+blocks and spoilers balanced at each cut, and the message ids are kept in
+`~/.local/state/fluxer-autoupdate/posted`. A failure, a check that cannot run
+(posted once when it starts, and once when it recovers) and a new major tag are
+never folded.
 
 With `AUTOUPDATE_OPENROUTER_KEY` also set, the post opens with *En bref*: three
 to five bullets written from that changelog by a cheap model on OpenRouter
