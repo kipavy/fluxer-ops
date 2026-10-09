@@ -8,10 +8,10 @@
 # Nothing new, which is most nights: nothing happens. Something new:
 # changelog.sh --summary, then update.sh --yes (overlay off and back on, health
 # checks), then the changelog goes to a channel (AUTOUPDATE_WEBHOOK_URL), in
-# French: a short visible part (versions, and a summary from a cheap model on
-# OpenRouter if AUTOUPDATE_OPENROUTER_KEY is set, else the heads-up section),
-# the full changelog folded in spoilers below it. A failure, a check that cannot
-# run, and a new major tag are posted unfolded, and failures go to notify.sh too. After a failure, automatic updates PAUSE until `on` is
+# French, as one short message: versions, a summary from a cheap model on
+# OpenRouter if AUTOUPDATE_OPENROUTER_KEY is set (else the heads-up section),
+# and a link to the full upstream compare. A failure, a check that cannot run
+# and a new major tag are posted too, and failures go to notify.sh as well. After a failure, automatic updates PAUSE until `on` is
 # run again: retrying every night on a broken stack helps nobody.
 #
 # Not followed automatically: a new major image tag (v1 -> v2). It is announced
@@ -77,18 +77,17 @@ live_version() {
 		| sed -n 's/^[Xx]-[Ff]luxer-[Vv]ersion: *//p' | tr -d '\r' | grep . || echo unknown
 }
 
-# Post a message (stdin) to the changelog channel; `post hidden` folds it into
-# block spoilers (webhook_post.py splits it under the size limit either way).
-# Best effort: never fails its caller. Message ids go to $STATE/posted, so a
-# post can be found again to edit or delete.
+# Post a message (stdin) to the changelog channel (webhook_post.py; split only
+# past the size limit). Best effort: never fails its caller. Message ids go to
+# $STATE/posted, so a post can be found again to edit or delete.
 post() {
 	[ -n "$AUTOUPDATE_WEBHOOK_URL" ] || { cat > /dev/null; return 0; }
 	if [ -n "$POST" ]; then
-		$POST "${1:-}" || log "posting to the channel failed"
+		$POST || log "posting to the channel failed"
 		return 0
 	fi
 	mkdir -p "$STATE"
-	ids=$(WEBHOOK="$AUTOUPDATE_WEBHOOK_URL" python3 "$OPS/webhook_post.py" ${1:+--$1} 2>> "$STATE/log") \
+	ids=$(WEBHOOK="$AUTOUPDATE_WEBHOOK_URL" python3 "$OPS/webhook_post.py" 2>> "$STATE/log") \
 		|| log "posting to the channel failed"
 	[ -z "${ids:-}" ] || printf '%s\n' "$ids" | sed "s/^/$(stamp) /" >> "$STATE/posted"
 }
@@ -364,17 +363,18 @@ cmd_run() {
 			[ "$images" -eq 0 ] || trigger="$images nouvelle(s) image(s)"
 			[ -z "$files" ] || trigger="${trigger:+$trigger, }modifié : ${files% }"
 			printf '_Déclencheur : %s_\n\n' "$trigger"
-			# Visible: the summary, or without one the heads-up section (breaking
-			# changes, reverts, removals), which should not need a click.
+			# The summary, or without one the heads-up section (breaking changes,
+			# reverts, removals); the full list is one click away, upstream.
 			if [ -s "$t/ai" ]; then
 				printf '**En bref**\n'; cat "$t/ai"; printf '\n'
 			else
 				awk '/^\*\*⚠️ À noter/ { f = 1 } f && /^$/ { exit } f' "$t/changelog"
 				printf '\n'
 			fi
-			printf '_Détails ci-dessous : clique pour afficher._\n'
+			link=$(sed -n 's/^Tout voir : <\(.*\)>$/\1/p' "$t/changelog" | head -n 1)
+			if [ -n "$link" ]; then printf 'Changelog détaillé : <%s>\n' "$link"
+			else printf 'Changelog détaillé : `fluxer changelog`\n'; fi
 		} | post
-		post hidden < "$t/changelog"
 		log "updated: $before -> $after"
 		record "updated ($before -> $after)"
 		$NOTIFY ok autoupdate || true
