@@ -68,10 +68,20 @@ done
 EOF
 # update.sh / changelog.sh / notify.sh / webhook poster: record their calls.
 printf '#!/bin/sh\necho "update $*" >> "$CALLS"\necho "update output line"\nexit "${UPDATE_RC:-0}"\n' > "$tmp/bin/update"
-printf '#!/bin/sh\necho "changelog $*" >> "$CALLS"\necho "COMPONENT RUNNING ON v1"\n' > "$tmp/bin/changelog"
+cat > "$tmp/bin/changelog" <<'EOF'
+#!/bin/sh
+echo "changelog $*" >> "$CALLS"
+printf '**Composants**\n- COMPONENT RUNNING ON v1\n\n**⚠️ À noter (1)**\n- moderation: remove a thing\n\n**✨ Nouveautés (1)**\n- app: a new thing\n\nTout voir : <https://github.com/x/compare/aaa...bbb>\n'
+EOF
 printf '#!/bin/sh\ncat > /dev/null\n[ -n "${AI_FAIL:-}" ] && exit 1\necho "- the short summary"\n' > "$tmp/bin/ai"
 printf '#!/bin/sh\necho "notify $*" >> "$CALLS"\n' > "$tmp/bin/notify"
-printf '#!/bin/sh\necho "post $(cat)" >> "$CALLS"\n' > "$tmp/bin/post"
+cat > "$tmp/bin/post" <<'EOF'
+#!/bin/sh
+body=$(cat)
+echo "post $body" >> "$CALLS"
+n=$(ls "$CALLS".post.* 2> /dev/null | wc -l)
+printf '%s\n' "$body" > "$CALLS.post.$n.visible"
+EOF
 chmod +x "$tmp/bin/"*
 
 load() {
@@ -83,11 +93,12 @@ load() {
 	INSTALL_DRY="$tmp/bin/installdry" UPDATE="$tmp/bin/update" CHANGELOG="$tmp/bin/changelog"
 	NOTIFY="$tmp/bin/notify" POST="$tmp/bin/post" ZONEINFO="$tmp/zoneinfo"
 	SUDO_CHECK=true PGREP=false SLEEP=true CURL=false
-	STATE="$tmp/state"; rm -rf "$STATE" "$CALLS" "$tmp/cron/user" "$tmp/pgn"
+	STATE="$tmp/state"; rm -rf "$STATE" "$CALLS" "$CALLS".post.* "$tmp/cron/user" "$tmp/pgn"
 	AUTOUPDATE_WEBHOOK_URL=https://chat.example.test/api/v1/webhooks/1/secret
 	AUTOUPDATE_OPENROUTER_KEY='' AI="$tmp/bin/ai"
 }
 cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
+posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
 
 # --- on / off: the crontab line, the confirmation, other lines left alone
 ( load
@@ -186,7 +197,10 @@ cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
   calls=$(cat "$CALLS")
   assert_contains "run: changelog (summary form) before the update" "changelog --summary" "$(head -n 1 "$CALLS")"
   assert_contains "run: update with --yes" "update --yes" "$calls"
-  assert_contains "run: posts the changelog to the channel" "COMPONENT RUNNING ON v1" "$calls"
+  assert_eq "run: one post per update" 1 "$(ls "$CALLS".post.* | wc -l)"
+  case "$calls" in *"a new thing"*) fail "run: the detailed list is not posted" ;; *) pass "run: the detailed list is not posted" ;; esac
+  assert_contains "run: no summary, so the heads-up is shown" "remove a thing" "$(posts visible)"
+  assert_contains "run: links the detailed changelog" "Changelog détaillé : <https://github.com/x/compare/aaa...bbb>" "$(posts visible)"
   assert_contains "run: the post says what triggered it" "1 nouvelle(s) image(s)" "$calls"
   case "$calls" in *"En bref"*) fail "run: no key, no AI summary" ;; *) pass "run: no key, no AI summary" ;; esac
   assert_contains "run: success clears an alert" "notify ok autoupdate" "$calls"
@@ -200,6 +214,7 @@ cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
   calls=$(cat "$CALLS")
   assert_contains "run: failure alerts" "notify alert autoupdate" "$calls"
   assert_contains "run: failure posts the tail of the log" "update output line" "$calls"
+
   assert_contains "run: the post says it is paused" "en pause" "$calls"
   finish )
 ( load
@@ -207,6 +222,14 @@ cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
   rc=0; cmd_run > /dev/null 2>&1 || rc=$?
   assert_eq "run: cannot tell exits 1" 1 "$rc"
   assert_contains "run: cannot tell alerts, no update" "notify alert autoupdate" "$(cat "$CALLS")"
+  assert_contains "run: cannot tell is posted to the channel" "impossible" "$(posts visible)"
+  rc=0; cmd_run > /dev/null 2>&1 || rc=$?
+  assert_eq "run: ... once, not every night" 1 "$(grep -c 'impossible' "$CALLS")"
+  REMOTE_STATUS=ok
+  cmd_run > /dev/null
+  assert_contains "run: recovery is posted" "rétablie" "$(cat "$CALLS")"
+  cmd_run > /dev/null
+  assert_eq "run: ... once" 1 "$(grep -c 'rétablie' "$CALLS")"
   case "$(cat "$CALLS")" in *update*--yes*) fail "run: cannot tell never updates" ;; *) pass "run: cannot tell never updates" ;; esac
   finish )
 ( load
@@ -220,7 +243,10 @@ cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
   AUTOUPDATE_OPENROUTER_KEY=sk-test
   cmd_run
   calls=$(cat "$CALLS")
-  assert_contains "run: with a key, the AI summary heads the post" "En bref" "$calls"
+  assert_contains "run: with a key, the AI summary heads the post" "En bref" "$(posts visible)"
+  case "$(posts visible)" in *"remove a thing"*) fail "run: with a summary, only the summary" ;;
+	*) pass "run: with a summary, only the summary" ;; esac
+  assert_contains "run: ... and the link" "Changelog détaillé" "$(posts visible)"
   assert_contains "run: the AI text is in it" "- the short summary" "$calls"
   assert_contains "run: trigger lists the stack file" "modifié : docker-compose.yml" "$calls"
   finish )
@@ -230,7 +256,7 @@ cron() { cat "$tmp/cron/user" 2> /dev/null || true; }
   cmd_run
   calls=$(cat "$CALLS")
   case "$calls" in *"En bref"*) fail "run: failed AI call, no summary" ;; *) pass "run: failed AI call, no summary" ;; esac
-  assert_contains "run: failed AI call still posts the changelog" "COMPONENT RUNNING ON v1" "$calls"
+  assert_contains "run: failed AI call falls back to the heads-up" "remove a thing" "$calls"
   finish )
 
 # --- a new major tag is announced once, never followed
