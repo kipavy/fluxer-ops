@@ -103,7 +103,8 @@ Three commands are worth knowing before you need them:
 | `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, container health, and that every script the app shell names resolves. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, brings the stack up if services are missing, and runs `premium.sh --repair`. |
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
-| `update.sh` | you, when updating | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
+| `update.sh` | you, when updating; `autoupdate.sh` | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
+| `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when the registry or the stack files have something new; posts the changelog to a channel, pauses itself after a failure. |
 | `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
 | `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
 | `overlay.sh` | `badge-patch.sh`, `panel.sh`, `update.sh` | The one writer of `docker-compose.override.yml` and the served `index.html`: composes the badge patch and the Ops panel. `suspend` drops it for an update. |
@@ -120,7 +121,9 @@ Three commands are worth knowing before you need them:
 | `prune.sh` | you | Frees image space while keeping every image a container, the compose file or the newest 2 installer records needs. Lists by default. |
 | `disk.sh` | you; user cron `--record` daily | Filesystem, volumes, backups, images; keeps `../fluxer-backups/disk-history.tsv` for growth and days-until-full. |
 | `env.sh` | you | `keys`/`get`/`set`/`diff` on `.env`; secrets masked, backup before every change. |
-| `changelog.sh` | you, before updating | Per-component running version vs what `v1` points at now, and the commits in between. |
+| `changelog.sh` | you, before updating; `autoupdate.sh` (`--summary`) | Per-component running version vs what `v1` points at now, and the commits in between. `--summary`: the same as chat markdown, commits grouped by `changelog_fmt.py`. |
+| `changelog_fmt.py` | `changelog.sh --summary` | Conventional Commit subjects into heads-up / new / fixes; CI, i18n, tests, docs and desktop-only commits counted, not listed. |
+| `registry.py` | `changelog.sh`, `autoupdate.sh` | Anonymous registry client: what a tag points at (digest, version, revision), and a repository's tags. |
 | `setup.sh` | you, or `get.sh` | Prerequisites, the instance (installing it if needed), the `fluxer` symlink, completion, cron jobs, optional extras. Idempotent; `--check` only reports. |
 | `get.sh` | `curl \| sh` | Clones this repository next to the instance and runs `setup.sh`. |
 | `lib.sh` | every script | Finds the instance (`FLUXER_DIR`) and backups (`BACKUP_ROOT`); nothing is hardcoded. |
@@ -134,6 +137,9 @@ Three commands are worth knowing before you need them:
 - `watchdog.sh` every 10 minutes in **root's** crontab (it needs iptables and systemctl);
   it also runs `premium.sh --repair`, so that needs no line of its own
 - `backup.sh` at 03:00 and `disk.sh --record` at 03:30 in the user's
+
+`fluxer autoupdate on` adds one more, only when asked (see
+[Automatic updates](#automatic-updates-fluxer-autoupdate)); `setup` never does.
 
 Each line carries `FLUXER_DIR=`, since cron starts with an empty environment.
 `fluxer setup --check` exits 1 if one is missing, which is also what `fluxer doctor`
@@ -284,6 +290,66 @@ by default, and removes by ID without `-f` only after you confirm. Other project
 images on this host are listed and never touched.
 
 Database schema migrations are not reverted by a rollback.
+
+### Automatic updates: `fluxer autoupdate`
+
+```sh
+fluxer autoupdate on              # nightly at 05:00 Europe/Paris; warns, asks y/N
+fluxer autoupdate on --at 04:30 --tz UTC
+fluxer autoupdate run --dry-run   # would tonight's run update? changes nothing
+fluxer autoupdate status          # schedule, paused or not, last result, log tail
+fluxer autoupdate off
+```
+
+Off by default, and `on` says plainly what it costs before asking: an update
+stops the stack for a few minutes (the installer's cold backup, then the
+recreate), what gets applied is not reviewed first (there are no release notes),
+and nothing rolls back on its own.
+
+**Only when there is something new.** Every run first compares the registry digest
+of each `fluxer-*` image's tag with the digests the running containers were pulled
+as, and reads `install.sh --update --dry-run`'s list of stack files. Nothing new --
+most nights -- means no update and so no downtime. A change to `.env.example`
+alone (a new optional setting) does not trigger one; it rides along with the next.
+When the registry cannot be asked, or the dry run's output cannot be read, the run
+does nothing and alerts: "cannot tell" is never taken for "nothing new".
+
+**The schedule.** The host clock is UTC, so cron fires every hour at the chosen
+minute and the run carries on only when the hour in `--tz` matches: summer and
+winter time need no crontab edit. 05:00 in Paris is 03:00 UTC in summer, when
+`backup.sh` runs, so a run waits (up to 30 minutes) for a backup in progress. A
+lock keeps two runs from overlapping.
+
+**What you hear.** With `AUTOUPDATE_WEBHOOK_URL` set in `notify.conf` (a Fluxer or
+Discord channel webhook), each applied update is posted there, in French: the
+version before and after, what triggered it, then `fluxer changelog --summary`
+taken just before the update -- each component's old and new version, and the
+commits grouped by `changelog_fmt.py` into *À noter* (breaking, reverts,
+removals), *Nouveautés* (`feat`) and *Corrections* (`fix`, `perf`). CI, i18n
+refreshes, tests, docs, refactors and desktop-only commits, a third of a typical
+update, are counted rather than listed, and one compare link covers the lot.
+Long posts are split across messages.
+
+With `AUTOUPDATE_OPENROUTER_KEY` also set, the post opens with *En bref*: three
+to five bullets written from that changelog by a cheap model on OpenRouter
+(`AUTOUPDATE_AI_MODEL`, default `anthropic/claude-haiku-5.5`, about $0.0005 an
+update). Only the commit subjects are sent. It is best effort: no key, a timeout
+or an error leaves it out and the changelog is posted as usual. A failure is posted
+there with the tail of `update.sh`'s output, and goes to the usual `notify.sh`
+channels (key `autoupdate`), as does a check that could not run.
+
+**After a failure** automatic updates **pause**: retrying every night on a broken
+stack helps nobody. `fluxer autoupdate status` says so; look with `fluxer check`,
+roll back with `fluxer rollback` if needed, and `fluxer autoupdate on` resumes.
+
+**Major tags are not followed.** The instance follows `FLUXER_IMAGE_TAG` (`v1`,
+which moves). When a `v2` tag appears it is announced in the channel once, and
+switching stays a human decision (`fluxer env set FLUXER_IMAGE_TAG v2`, then
+`fluxer update`).
+
+`update.sh` needs sudo (the iptables preflight), so `on` refuses on an account
+without passwordless sudo: cron cannot type a password. State and log live in
+`~/.local/state/fluxer-autoupdate/`.
 
 ## The Visionary badge patch
 

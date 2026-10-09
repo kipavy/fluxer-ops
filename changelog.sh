@@ -16,6 +16,10 @@
 #
 #   ./changelog.sh          versions, then the newest 60 commits an update brings
 #   ./changelog.sh --all    every commit
+#   ./changelog.sh --summary
+#                           chat markdown instead: what changed per component, then
+#                           the commits grouped and filtered by changelog_fmt.py
+#                           (what autoupdate.sh posts to its channel)
 set -eu
 
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
@@ -23,16 +27,21 @@ need_instance
 REPO=${FLUXER_SOURCE_REPO:-https://github.com/fluxerapp/fluxer}
 RAW_BASE='https://raw.githubusercontent.com/fluxerapp/fluxer'
 LIMIT=60
+SUMMARY=0
 case "${1:-}" in
 	'') ;;
 	--all) LIMIT=0 ;;
-	*) echo "usage: changelog.sh [--all]" >&2; exit 2 ;;
+	--summary) SUMMARY=1 ;;
+	*) echo "usage: changelog.sh [--all | --summary]" >&2; exit 2 ;;
 esac
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cd "$FLUXER_DIR"
+# --summary: the human report still gets built (same code path, nothing to
+# drift), into a file; the summary is written to the real stdout at the end.
+if [ "$SUMMARY" -eq 1 ]; then exec 3>&1 > "$tmp/human"; fi
 
 env_value() { sed -n "s/^$1=//p" .env | head -n 1; }
 tag=$(env_value FLUXER_IMAGE_TAG)
@@ -64,52 +73,7 @@ done < "$tmp/running"
 #    docker pull does), for this host's platform.
 platform=$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}' 2>/dev/null || echo linux/amd64)
 # shellcheck disable=SC2046 # one argument per image reference, none has spaces
-python3 - "$platform" $(awk '{ print $1 }' "$tmp/fluxer") > "$tmp/remote" <<'PY'
-import json, re, sys, urllib.request, urllib.error
-os_, arch = sys.argv[1].split("/", 1)
-ACCEPT = ", ".join([
-    "application/vnd.oci.image.index.v1+json", "application/vnd.docker.distribution.manifest.list.v2+json",
-    "application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"])
-tokens = {}
-def get(host, repo, path, accept):
-    url = f"https://{host}/v2/{repo}/{path}"
-    for attempt in (0, 1):
-        h = {"Accept": accept}
-        if repo in tokens:
-            h["Authorization"] = "Bearer " + tokens[repo]
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, headers=h), timeout=20) as r:
-                return r.headers, r.read()
-        except urllib.error.HTTPError as e:
-            auth = e.headers.get("WWW-Authenticate", "")
-            if e.code != 401 or attempt or not auth.startswith("Bearer"):
-                raise
-            p = dict(re.findall(r'(\w+)="([^"]*)"', auth))
-            q = f"{p['realm']}?service={p.get('service', '')}&scope=repository:{repo}:pull"
-            with urllib.request.urlopen(q, timeout=20) as r:
-                j = json.load(r)
-            tokens[repo] = j.get("token") or j.get("access_token")
-for ref in sys.argv[2:]:
-    name, _, tag = ref.rpartition(":")
-    host, _, repo = name.partition("/")
-    try:
-        hdr, body = get(host, repo, "manifests/" + tag, ACCEPT)
-        digest = hdr.get("Docker-Content-Digest", "-")
-        m = json.loads(body)
-        if "manifests" in m:
-            pick = [x for x in m["manifests"] if x.get("platform", {}).get("os") == os_
-                    and x.get("platform", {}).get("architecture") == arch]
-            if not pick:
-                print(ref, "-", "-", digest, "no image for " + sys.argv[1]); continue
-            _, body = get(host, repo, "manifests/" + pick[0]["digest"], ACCEPT)
-            m = json.loads(body)
-        _, body = get(host, repo, "blobs/" + m["config"]["digest"], "*/*")
-        labels = json.loads(body).get("config", {}).get("Labels") or {}
-        print(ref, labels.get("org.opencontainers.image.version") or "-",
-              labels.get("org.opencontainers.image.revision") or "-", digest, "ok")
-    except Exception as e:
-        print(ref, "-", "-", "-", "registry: " + str(e).replace("\n", " ")[:80])
-PY
+python3 "$OPS/registry.py" manifests "$platform" $(awk '{ print $1 }' "$tmp/fluxer") > "$tmp/remote"
 
 # 3. The history, without the API. Tags come along, for the latest-release column.
 repo_ok=1
@@ -136,7 +100,7 @@ latest_release() {
 }
 
 printf '%-30s %-17s %-17s %-17s %s\n' COMPONENT RUNNING "ON $tag" 'LATEST RELEASE' ''
-: > "$tmp/ranges"; : > "$tmp/unknown"
+: > "$tmp/ranges"; : > "$tmp/unknown"; : > "$tmp/changed"; : > "$tmp/thirdparty"
 while read -r image ver rev digests id; do
 	comp=${image##*/}; comp=${comp%:*}
 	rev=$(revision_of "$comp" "$ver" "$rev")
@@ -164,6 +128,7 @@ while read -r image ver rev digests id; do
 		note='revision unknown, cannot list commits'
 		printf '%s %s %s\n' "$comp" "$rev" "$rrev" >> "$tmp/unknown"
 	fi
+	case "$note" in 'up to date' | '('*) ;; *) printf '%s %s %s\n' "$comp" "$ver" "${rver:--}" >> "$tmp/changed" ;; esac
 	printf '%-30s %-17s %-17s %-17s %s\n' "$comp" "$ver" "${rver:--}" "$(latest_release "$comp")" "$note"
 done < "$tmp/fluxer"
 
@@ -183,16 +148,43 @@ if curl -fsSL --max-time 30 "$RAW_BASE/$ref/deploy/self-hosting/docker-compose.y
 			END {
 				for (r in old) printf "  %-40s -> %s\n", old[r], (r in new ? new[r] : "(removed)")
 				for (r in new) if (!(r in old)) printf "  %-40s -> %s\n", "(new)", new[r]
-			}' | sort
+			}' | sort | tee "$tmp/thirdparty"
 		pg_old=$(sed -n 's/^postgres:\([0-9][0-9]*\).*/\1/p' "$tmp/img-local")
 		pg_new=$(sed -n 's/^postgres:\([0-9][0-9]*\).*/\1/p' "$tmp/img-up")
 		if [ -n "$pg_old" ] && [ -n "$pg_new" ] && [ "$pg_old" != "$pg_new" ]; then
-			echo "  WARNING: postgres $pg_old -> $pg_new is a major version change. install.sh --update refuses it; it needs a dump and restore."
+			echo "  WARNING: postgres $pg_old -> $pg_new is a major version change. install.sh --update refuses it; it needs a dump and restore." \
+				| tee -a "$tmp/thirdparty"
 		fi
 	fi
 else
 	printf '\nThird-party images: could not fetch upstream docker-compose.yml at %s.\n' "$ref"
 fi
+
+summary() { # chat markdown on fd 3; commit subjects (sha TAB subject) on stdin
+	{
+		if [ -s "$tmp/changed" ]; then
+			echo "**Composants**"
+			while read -r comp ver rver; do printf -- '- %s %s → %s\n' "${comp#fluxer-}" "$ver" "$rver"; done < "$tmp/changed"
+		fi
+		if [ -s "$tmp/thirdparty" ]; then
+			echo "**Images tierces**"
+			sed 's/^ *//; s/  */ /g; s/^/- /' "$tmp/thirdparty"
+		fi
+		[ -s "$tmp/unknown" ] && printf '_Pas de liste de commits pour : %s_\n' "$(awk '{ print $1 }' "$tmp/unknown" | tr '\n' ' ')"
+		echo
+		# One compare link for the lot: the oldest running revision to the newest
+		# available one (fewest / most commits in their history).
+		if [ -s "$tmp/ranges" ]; then
+			oldest=$(awk '{ print $1 }' "$tmp/ranges" | sort -u | while read -r r; do
+				printf '%s %s\n' "$(g rev-list --count "$r")" "$r"; done | sort -n | head -n 1 | cut -d' ' -f2)
+			newest=$(awk '{ print $2 }' "$tmp/ranges" | sort -u | while read -r r; do
+				printf '%s %s\n' "$(g rev-list --count "$r")" "$r"; done | sort -n | tail -n 1 | cut -d' ' -f2)
+			python3 "$OPS/changelog_fmt.py" --compare "$REPO/compare/$oldest...$newest"
+		else
+			python3 "$OPS/changelog_fmt.py"
+		fi
+	} >&3
+}
 
 # 5. The commits: union of every component's range, newest first. A commit
 #    listed here is in some component's update; not every commit touches every one.
@@ -209,11 +201,16 @@ if [ -s "$tmp/unknown" ]; then
 fi
 if [ ! -s "$tmp/ranges" ]; then
 	echo "No new commits to list."
+	[ "$SUMMARY" -eq 0 ] || summary < /dev/null
 	exit 0
 fi
 while read -r rev rrev; do
 	g rev-list "$rrev" "^$rev"
 done < "$tmp/ranges" | sort -u > "$tmp/commits"
+if [ "$SUMMARY" -eq 1 ]; then
+	g log --no-walk=sorted --stdin --format='%h%x09%s' < "$tmp/commits" | summary
+	exit 0
+fi
 total=$(grep -c . "$tmp/commits")
 shown=$total
 [ "$LIMIT" -eq 0 ] || [ "$total" -le "$LIMIT" ] || shown=$LIMIT
