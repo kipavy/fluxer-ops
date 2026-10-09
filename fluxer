@@ -32,6 +32,8 @@ Updates
   fluxer changelog [--all]   What an update would bring, per component
   fluxer update [--check]    Update safely: preflight, plan, apply, verify
   fluxer rollback            Go back to the previous release
+  fluxer autoupdate on [--at HH:MM] [--tz ZONE] | off | status | run [--dry-run]
+                             Nightly update, only when upstream has one; changelog to a channel
   fluxer prune [--apply]     Free image space without breaking rollback
 
 Accounts
@@ -324,6 +326,7 @@ case "$cmd" in
 	doctor) exec "$OPS/doctor.sh" "$@" ;;
 	errors | top | voice | psql | valkey | sh) exec "$OPS/debug.sh" "$cmd" "$@" ;;
 	update) exec "$OPS/update.sh" "$@" ;;
+	autoupdate) exec "$OPS/autoupdate.sh" "$@" ;;
 	changelog) exec "$OPS/changelog.sh" "$@" ;;
 	prune) exec "$OPS/prune.sh" "$@" ;;
 	users) exec "$OPS/users.sh" "$@" ;;

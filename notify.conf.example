@@ -38,6 +38,16 @@
 #NOTIFY_SMTP_SECURE=true
 #NOTIFY_EMAIL_FROM=alerts@example.com
 
+# --- fluxer autoupdate: the channel that gets each update's changelog ---
+# A Fluxer or Discord webhook URL. Only autoupdate.sh posts here (the changelog
+# after an update, a failure, a new major tag), not the alerts above, which go
+# to every channel configured above as usual.
+#AUTOUPDATE_WEBHOOK_URL=https://chat.example.com/api/v1/webhooks/ID/TOKEN
+# Optional: a few French bullets summing up each changelog, from a cheap model
+# on OpenRouter (the commit subjects are sent there). Off without a key.
+#AUTOUPDATE_OPENROUTER_KEY=sk-or-v1-CHANGE-ME
+#AUTOUPDATE_AI_MODEL=anthropic/claude-haiku-5.5
+
 # --- behaviour ---
 # While something stays broken, repeat the alert this often. 0 = never.
 #NOTIFY_REMIND_HOURS=24
