@@ -85,7 +85,24 @@ load_config() {
 # One value from .env, read rather than sourced: values can hold anything.
 # Only for non-secret keys; the delivery helper reads the SMTP password itself.
 env_value() {
+	if fx_managed; then
+		fx_env "$1"
+		return
+	fi
 	sed -n "s/^$1=//p" "$ENV_FILE" 2> /dev/null | head -n 1 | sed "s/^[\"']//; s/[\"']\$//"
+}
+
+# Under rexctl there is no .env: the email channel gets a private one-off file with
+# just the instance's SMTP settings, in the format the delivery helper reads.
+smtp_env_file() {
+	f=$(mktemp)
+	chmod 600 "$f"
+	for k in FLUXER_EMAIL_SMTP_HOST FLUXER_EMAIL_SMTP_PORT FLUXER_EMAIL_SMTP_USERNAME FLUXER_EMAIL_SMTP_PASSWORD \
+		FLUXER_EMAIL_SMTP_SECURE FLUXER_EMAIL_FROM_EMAIL FLUXER_EMAIL_FROM_NAME; do
+		v=$(fx_env "$k")
+		[ -z "$v" ] || printf '%s=%s\n' "$k" "$v" >> "$f"
+	done
+	printf '%s\n' "$f"
 }
 
 channels() {
@@ -144,9 +161,12 @@ deliver() {
 	# Belt and braces over the per-call 10s timeouts: DNS and TLS can still stall.
 	limit=''
 	if command -v timeout > /dev/null 2>&1; then limit='timeout 30'; fi
+	envf=$ENV_FILE
+	if [ "$1" = email ] && fx_managed; then envf=$(smtp_env_file); fi
+	drc=0
 	# shellcheck disable=SC2086
-	N_CHANNEL=$1 N_LEVEL=$2 N_TITLE=$3 N_BODY=$4 FLUXER_ENV_FILE=$ENV_FILE \
-		$limit python3 - <<'PY'
+	N_CHANNEL=$1 N_LEVEL=$2 N_TITLE=$3 N_BODY=$4 FLUXER_ENV_FILE=$envf \
+		$limit python3 - <<'PY' || drc=$?
 import base64, json, os, smtplib, ssl, sys, urllib.parse, urllib.request
 from email.header import Header
 from email.message import EmailMessage
@@ -281,6 +301,8 @@ except Exception as x:
     print(reason[:300], file=sys.stderr)
     sys.exit(1)
 PY
+	[ "$envf" = "$ENV_FILE" ] || rm -f "$envf"
+	return "$drc"
 }
 
 # send_all <level> <title> <message> - every configured channel. Returns 0 when

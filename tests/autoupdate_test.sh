@@ -1,8 +1,8 @@
 #!/bin/sh
-# shellcheck disable=SC2034 # file-wide: the stub variables set here (DOCKER, REGISTRY,
+# shellcheck disable=SC2034 # file-wide: the stub variables set here (UPGRADE_CHECK,
 # UPDATE, ...) are inputs to the autoupdate.sh functions this file sources with `load`.
 # autoupdate_test.sh - autoupdate.sh against stubs in a scratch directory.
-# No real crontab, docker, registry, update or network is touched.
+# No real crontab, rexctl, update or network is touched.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$(dirname "$HERE")
@@ -25,47 +25,19 @@ case "$1" in
 	-) cat > "$f.new" && mv "$f.new" "$f" ;;
 esac
 EOF
-# docker stub: two fluxer containers and one third-party one. RepoDigests come
-# from $DIGESTS_<n> so each case can say what runs.
-cat > "$tmp/bin/docker" <<'EOF'
+# rexctl upgrade --check --json stub: an upgrade is out when $AVAIL is set, rexctl
+# cannot reach it when $BLOCKED is, and the check itself fails when $CHECK_FAIL is.
+cat > "$tmp/bin/upcheck" <<'X'
 #!/bin/sh
-case "$*" in
-	"compose ps -aq") printf 'c1\nc2\nc3\n' ;;
-	"version --format"*) echo linux/arm64 ;;
-	inspect*) cat <<'X'
-ghcr.io/fluxerapp/fluxer-api:v1 sha256:i1
-ghcr.io/fluxerapp/fluxer-gateway:v1 sha256:i2
-postgres:16-alpine sha256:i3
+[ -n "${CHECK_FAIL:-}" ] && { echo "Couldn't check for a new release." >&2; exit 1; }
+if [ -n "${AVAIL:-}" ]; then
+	b=false m=''
+	[ -z "${BLOCKED:-}" ] || { b=true; m=2026.1024.1; }
+	printf '{"current":"2026.1023.1","latest":"2026.1025.2","available":true,"blocked":%s,"min_from":"%s"}\n' "$b" "$m"
+else
+	printf '{"current":"2026.1025.2","latest":"2026.1025.2","available":false,"blocked":false}\n'
+fi
 X
-	;;
-	"image inspect --format"*sha256:i1) echo "ghcr.io/fluxerapp/fluxer-api@sha256:${API_DIGEST:-aaa}" ;;
-	"image inspect --format"*sha256:i2) echo "ghcr.io/fluxerapp/fluxer-gateway@sha256:bbb" ;;
-	*) echo "docker stub: unexpected: $*" >&2; exit 1 ;;
-esac
-EOF
-# registry stub: the tag points at aaa/bbb unless REMOTE_API says otherwise.
-cat > "$tmp/bin/registry" <<'EOF'
-#!/bin/sh
-if [ "$1" = tags ]; then printf 'latest\nv1\n%s' "${EXTRA_TAG:-}"; exit 0; fi
-shift 2
-for r in "$@"; do
-	case "$r" in
-		*fluxer-api:v1) printf '%s 2026.1 rev1 sha256:%s %s\n' "$r" "${REMOTE_API:-aaa}" "${REMOTE_STATUS:-ok}" ;;
-		*fluxer-gateway:v1) printf '%s 2026.1 rev2 sha256:bbb ok\n' "$r" ;;
-		*) echo "registry stub: unexpected ref $r" >&2; exit 1 ;;
-	esac
-done
-EOF
-# install.sh --update --dry-run stub: its file list, from $CHANGED (space-separated).
-cat > "$tmp/bin/installdry" <<'EOF'
-#!/bin/sh
-[ -n "${DRY_FAIL:-}" ] && { echo "boom"; exit 1; }
-echo "Downloading the stack files from ref main."
-echo "  file changes"
-for f in docker-compose.yml Caddyfile .env.example; do
-	case " ${CHANGED:-} " in *" $f "*) echo "    $f changes" ;; *) echo "    $f is unchanged" ;; esac
-done
-EOF
 # update.sh / changelog.sh / notify.sh / webhook poster: record their calls.
 printf '#!/bin/sh\necho "update $*" >> "$CALLS"\necho "update output line"\nexit "${UPDATE_RC:-0}"\n' > "$tmp/bin/update"
 cat > "$tmp/bin/changelog" <<'EOF'
@@ -89,8 +61,8 @@ load() {
 	export FLUXER_DIR
 	. "$tmp/inst/ops/autoupdate.sh"
 	CRON_DIR="$tmp/cron" CALLS="$tmp/calls"; export CRON_DIR CALLS
-	CRONTAB="$tmp/bin/crontab" DOCKER="$tmp/bin/docker" REGISTRY="$tmp/bin/registry"
-	INSTALL_DRY="$tmp/bin/installdry" UPDATE="$tmp/bin/update" CHANGELOG="$tmp/bin/changelog"
+	CRONTAB="$tmp/bin/crontab" UPGRADE_CHECK="$tmp/bin/upcheck"
+	UPDATE="$tmp/bin/update" CHANGELOG="$tmp/bin/changelog"
 	NOTIFY="$tmp/bin/notify" POST="$tmp/bin/post" ZONEINFO="$tmp/zoneinfo"
 	SUDO_CHECK=true PGREP=false SLEEP=true CURL=false
 	STATE="$tmp/state"; rm -rf "$STATE" "$CALLS" "$CALLS".post.* "$tmp/cron/user" "$tmp/pgn"
@@ -141,38 +113,36 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
   assert_contains "on: says when no changelog channel is configured" "AUTOUPDATE_WEBHOOK_URL" "$out"
   finish )
 
-# --- detect: what counts as an update
+# --- detect: what counts as an update (rexctl's answer)
 ( load
   rc=0; detect > /dev/null || rc=$?
-  assert_eq "detect: same digests, files unchanged = nothing" 1 "$rc"
-  REMOTE_API=new; export REMOTE_API
+  assert_eq "detect: no newer release = nothing" 1 "$rc"
+  AVAIL=1; export AVAIL
   rc=0; r=$(detect) || rc=$?
-  assert_eq "detect: a new image digest is an update" 0 "$rc"
-  assert_contains "detect: names the component" "fluxer-api" "$r"
+  assert_eq "detect: a newer release is an update" 0 "$rc"
+  assert_contains "detect: names both releases" "2026.1023.1 -> 2026.1025.2" "$r"
   finish )
 ( load
-  CHANGED='docker-compose.yml'; export CHANGED
-  rc=0; r=$(detect) || rc=$?
-  assert_eq "detect: a changed compose file is an update" 0 "$rc"
-  assert_contains "detect: names the file" "docker-compose.yml" "$r"
-  CHANGED='.env.example'
-  rc=0; detect > /dev/null || rc=$?
-  assert_eq "detect: .env.example alone is not worth a downtime" 1 "$rc"
-  finish )
-( load
-  REMOTE_STATUS='registry:timeout'; export REMOTE_STATUS
+  AVAIL=1 BLOCKED=1; export AVAIL BLOCKED
   rc=0; r=$(detect 2>&1) || rc=$?
-  assert_eq "detect: registry error = cannot tell" 2 "$rc"
-  assert_contains "detect: says why" "timeout" "$r"
+  assert_eq "detect: blocked = cannot tell, never forced" 2 "$rc"
+  assert_contains "detect: says what it needs first" "2026.1024.1" "$r"
   finish )
 ( load
-  DRY_FAIL=1; export DRY_FAIL
+  CHECK_FAIL=1; export CHECK_FAIL
+  rc=0; r=$(detect 2>&1) || rc=$?
+  assert_eq "detect: failing check = cannot tell" 2 "$rc"
+  assert_contains "detect: says why" "Couldn't check" "$r"
+  UPGRADE_CHECK=true
+  unset CHECK_FAIL
   rc=0; detect > /dev/null 2>&1 || rc=$?
-  assert_eq "detect: failing dry run = cannot tell" 2 "$rc"
-  INSTALL_DRY=true
-  unset DRY_FAIL
-  rc=0; detect > /dev/null 2>&1 || rc=$?
-  assert_eq "detect: unparseable dry run = cannot tell, not 'nothing'" 2 "$rc"
+  assert_eq "detect: empty answer = cannot tell, not 'nothing'" 2 "$rc"
+  finish )
+( load
+  UPGRADE_CHECK=''
+  rc=0; r=$(detect 2>&1) || rc=$?
+  assert_eq "detect: an old-installer instance = cannot tell" 2 "$rc"
+  assert_contains "detect: ... and says to migrate" "fluxer migrate" "$r"
   finish )
 
 # --- run: the hour gate, pause, and both outcomes
@@ -192,7 +162,7 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
   assert_contains "run: records it" "up to date" "$(cat "$STATE/last")"
   finish )
 ( load
-  REMOTE_API=new; export REMOTE_API
+  AVAIL=1; export AVAIL
   cmd_run
   calls=$(cat "$CALLS")
   assert_contains "run: changelog (summary form) before the update" "changelog --summary" "$(head -n 1 "$CALLS")"
@@ -201,13 +171,13 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
   case "$calls" in *"a new thing"*) fail "run: the detailed list is not posted" ;; *) pass "run: the detailed list is not posted" ;; esac
   assert_contains "run: no summary, so the heads-up is shown" "remove a thing" "$(posts visible)"
   assert_contains "run: links the detailed changelog" "Changelog détaillé : <https://github.com/x/compare/aaa...bbb>" "$(posts visible)"
-  assert_contains "run: the post says what triggered it" "1 nouvelle(s) image(s)" "$calls"
+  assert_contains "run: the post names the release" "_Release 2026.1023.1 -> 2026.1025.2_" "$calls"
   case "$calls" in *"En bref"*) fail "run: no key, no AI summary" ;; *) pass "run: no key, no AI summary" ;; esac
   assert_contains "run: success clears an alert" "notify ok autoupdate" "$calls"
   assert_contains "run: records it" "updated" "$(cat "$STATE/last")"
   finish )
 ( load
-  REMOTE_API=new UPDATE_RC=1; export REMOTE_API UPDATE_RC
+  AVAIL=1 UPDATE_RC=1; export AVAIL UPDATE_RC
   rc=0; cmd_run > /dev/null 2>&1 || rc=$?
   assert_eq "run: failed update exits 1" 1 "$rc"
   [ -e "$STATE/paused" ] && pass "run: failure pauses auto-updates" || fail "run: failure pauses auto-updates"
@@ -218,14 +188,14 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
   assert_contains "run: the post says it is paused" "en pause" "$calls"
   finish )
 ( load
-  REMOTE_STATUS='registry:timeout'; export REMOTE_STATUS
+  CHECK_FAIL=1; export CHECK_FAIL
   rc=0; cmd_run > /dev/null 2>&1 || rc=$?
   assert_eq "run: cannot tell exits 1" 1 "$rc"
   assert_contains "run: cannot tell alerts, no update" "notify alert autoupdate" "$(cat "$CALLS")"
   assert_contains "run: cannot tell is posted to the channel" "impossible" "$(posts visible)"
   rc=0; cmd_run > /dev/null 2>&1 || rc=$?
   assert_eq "run: ... once, not every night" 1 "$(grep -c 'impossible' "$CALLS")"
-  REMOTE_STATUS=ok
+  unset CHECK_FAIL
   cmd_run > /dev/null
   assert_contains "run: recovery is posted" "rétablie" "$(cat "$CALLS")"
   cmd_run > /dev/null
@@ -233,13 +203,13 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
   case "$(cat "$CALLS")" in *update*--yes*) fail "run: cannot tell never updates" ;; *) pass "run: cannot tell never updates" ;; esac
   finish )
 ( load
-  REMOTE_API=new; export REMOTE_API
+  AVAIL=1; export AVAIL
   cmd_run --dry-run > /dev/null
   case "$(cat "$CALLS" 2>/dev/null)" in *update*) fail "run --dry-run: never updates" ;; *) pass "run --dry-run: never updates" ;; esac
   finish )
 
 ( load
-  REMOTE_API=new CHANGED='docker-compose.yml'; export REMOTE_API CHANGED
+  AVAIL=1; export AVAIL
   AUTOUPDATE_OPENROUTER_KEY=sk-test
   cmd_run
   calls=$(cat "$CALLS")
@@ -248,24 +218,15 @@ posts() { cat "$CALLS".post.*."$1" 2> /dev/null || true; }
 	*) pass "run: with a summary, only the summary" ;; esac
   assert_contains "run: ... and the link" "Changelog détaillé" "$(posts visible)"
   assert_contains "run: the AI text is in it" "- the short summary" "$calls"
-  assert_contains "run: trigger lists the stack file" "modifié : docker-compose.yml" "$calls"
+
   finish )
 ( load
-  REMOTE_API=new AI_FAIL=1; export REMOTE_API AI_FAIL
+  AVAIL=1 AI_FAIL=1; export AVAIL AI_FAIL
   AUTOUPDATE_OPENROUTER_KEY=sk-test
   cmd_run
   calls=$(cat "$CALLS")
   case "$calls" in *"En bref"*) fail "run: failed AI call, no summary" ;; *) pass "run: failed AI call, no summary" ;; esac
   assert_contains "run: failed AI call falls back to the heads-up" "remove a thing" "$calls"
-  finish )
-
-# --- a new major tag is announced once, never followed
-( load
-  EXTRA_TAG=v2; export EXTRA_TAG
-  cmd_run
-  cmd_run
-  assert_eq "major: announced once" 1 "$(grep -c 'post .*v2' "$CALLS")"
-  case "$(cat "$CALLS")" in *update*--yes*) fail "major: not followed" ;; *) pass "major: not followed" ;; esac
   finish )
 
 # --- the backup is waited for

@@ -14,9 +14,9 @@ say() { if [ "$QUIET" -eq 0 ]; then printf '%s\n' "$*"; fi; }
 fails=0
 note_fail() { fails=$((fails + 1)); printf 'FAIL  %s\n' "$*" >&2; }
 
-domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
+domain=$(fx_domain)
 if [ -z "$domain" ]; then
-	echo "FAIL  no FLUXER_DOMAIN in $FLUXER_DIR/.env" >&2
+	echo "FAIL  cannot read the instance's domain (rexctl config get domain, or FLUXER_DOMAIN in .env)" >&2
 	exit 1
 fi
 base="https://$domain"
@@ -59,7 +59,7 @@ else
 fi
 
 # 3. Container health. seaweedfs-init is a one-shot bucket job; Exited (0) is correct.
-bad=$(cd "$FLUXER_DIR" && docker compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null \
+bad=$(compose ps -a --format '{{.Service}} {{.Status}}' 2>/dev/null \
 	| grep -v '^seaweedfs-init ' | grep -Ev ' Up .*healthy| Up [0-9]' || true)
 if [ -n "$bad" ]; then
 	note_fail "containers not healthy:"

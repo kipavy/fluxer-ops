@@ -29,9 +29,9 @@ need_instance
 PG_CONTAINER=${PG_CONTAINER:-}
 
 die() { printf 'debug: %s\n' "$*" >&2; exit 1; }
-compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
-# Only ever read single, non-secret keys out of .env.
-env_val() { sed -n "s/^$1=//p" "$FLUXER_DIR/.env" 2>/dev/null | head -n 1 | tr -d '"'"'"; }
+# compose, fx_env, fx_services: lib.sh.
+# Only ever read single, non-secret settings.
+env_val() { fx_env "$1"; }
 
 # Allocate a TTY only when there is one: piped input (`... < file.sql`) needs -T.
 tty_flag() { if [ -t 0 ] && [ -t 1 ]; then echo ''; else echo '-T'; fi; }
@@ -54,25 +54,25 @@ cmd_psql() {
 		fi
 		exec docker exec -i "$PG_CONTAINER" psql -U fluxer -d fluxer "$@"
 	fi
-	cd "$FLUXER_DIR"
+	# (lib.sh compose: by project name under rexctl)
 	# shellcheck disable=SC2046 # empty or -T, deliberately unquoted
-	exec docker compose exec $(tty_flag) postgres psql -U fluxer -d fluxer "$@"
+	compose exec $(tty_flag) postgres psql -U fluxer -d fluxer "$@"
 }
 
 # The compose file starts valkey with no requirepass, so no auth is needed.
 cmd_valkey() {
-	cd "$FLUXER_DIR"
+	# (lib.sh compose)
 	# shellcheck disable=SC2046
-	exec docker compose exec $(tty_flag) valkey valkey-cli "$@"
+	compose exec $(tty_flag) valkey valkey-cli "$@"
 }
 
 cmd_sh() {
 	[ $# -eq 1 ] || die 'usage: debug.sh sh <service>'
 	svc=$1
-	compose config --services | grep -qx "$svc" || die "no such service: $svc"
-	cd "$FLUXER_DIR"
+	fx_services | grep -qx "$svc" || die "no such service: $svc"
+	# (lib.sh compose)
 	# shellcheck disable=SC2046
-	exec docker compose exec $(tty_flag) "$svc" sh -c 'command -v bash > /dev/null && exec bash || exec sh'
+	compose exec $(tty_flag) "$svc" sh -c 'command -v bash > /dev/null && exec bash || exec sh'
 }
 
 cmd_errors() {
@@ -90,7 +90,7 @@ cmd_errors() {
 	done
 	case "$since" in *[!A-Za-z0-9:.+-]*) die "odd --since value: '$since'" ;; esac
 	if [ -n "$svc" ]; then
-		compose config --services | grep -qx "$svc" || die "no such service: $svc"
+		fx_services | grep -qx "$svc" || die "no such service: $svc"
 	fi
 
 	out=$(mktemp)
@@ -282,7 +282,7 @@ cmd_voice() {
 	fi
 
 	# The IP that matters is the one LiveKit advertises in its ICE candidates.
-	node_ip=$(env_val FLUXER_LIVEKIT_NODE_IP) src='FLUXER_LIVEKIT_NODE_IP in .env'
+	node_ip=$(env_val FLUXER_LIVEKIT_NODE_IP) src='FLUXER_LIVEKIT_NODE_IP (rexctl: voice.public_ip)'
 	if [ -z "$node_ip" ] && [ -n "$cid" ]; then
 		node_ip=$(docker logs "$cid" 2>&1 | grep -o '"nodeIP": "[^"]*"' | tail -n 1 | sed 's/.*: "//; s/"$//')
 		src="what LiveKit discovered via STUN at startup"

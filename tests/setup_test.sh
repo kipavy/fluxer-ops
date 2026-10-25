@@ -293,9 +293,10 @@ EOF
   FLUXER_DIR="$tmp/new" DOMAIN=chat.example.test EMAIL=me@example.test ALLOW_ROOT=''
 
   phase_install > /dev/null
-  assert_eq "installer gets dir, domain, email, non-interactive" \
-	"--dir $tmp/new --domain chat.example.test --email me@example.test --non-interactive" "$(cat "$tmp/up/args")"
-  assert_eq "installer kept in the instance dir" "$(cat "$tmp/up/install.sh")" "$(cat "$tmp/new/install.sh")"
+  assert_eq "installer runs rexctl install with dir and domain, no questions" \
+	"install --dir $tmp/new --domain chat.example.test --setup browser --yes" "$(cat "$tmp/up/args")"
+  [ ! -e "$tmp/new/install.sh" ] && pass "no installer left in the instance dir" \
+	|| fail "no installer left in the instance dir"
   assert_eq "marks a new instance" 1 "$NEW_INSTANCE"
 
   rc=0; ( export STUB_RC=6; phase_install > "$tmp/o6" 2>&1 ) || rc=$?
@@ -332,8 +333,6 @@ EOF
   # own $0 check above would exit 1 and this `die`s under set -eu, failing the test.
   phase_install > "$tmp/pinst" 2>&1
   assert_eq "marks a new instance" 1 "$NEW_INSTANCE"
-  [ -f "$tmp/new3/install.sh" ] && pass "still leaves a copy at FLUXER_DIR for the record" \
-	|| fail "still leaves a copy at FLUXER_DIR for the record"
   finish )
 
 # --- phase_instance: found, the domain-less edge case, and half-installed
@@ -355,7 +354,7 @@ EOF
     *"(https://)"*) fail "empty domain: does not print a bare (https://)" ;;
     *) pass "empty domain: does not print a bare (https://)" ;;
   esac
-  assert_contains "empty domain: says so honestly" "no FLUXER_DOMAIN" "$out"
+  assert_contains "old-installer instance: says to migrate" "fluxer migrate" "$out"
 
   # Half-installed: docker-compose.yml without .env. A plain re-run must name
   # the file in the way rather than walk into phase_install and upstream's

@@ -72,7 +72,8 @@ pkg_hint() {
 }
 
 # Same ingredients as lib.sh's rule, but not the same order: FLUXER_DIR, then a
-# compose project whose .env names a FLUXER_DOMAIN, then the two well-known places.
+# compose project that is a Fluxer instance (.rexctl/state.json, or a .env naming a
+# FLUXER_DOMAIN), then the two well-known places.
 # lib.sh's middle step - the directory above ops/ - has no meaning here: this
 # function is deciding where ops/ will BE cloned, so there is no ops/ yet to look
 # above. get.sh is not here either, which is why the rule is duplicated rather
@@ -83,12 +84,13 @@ find_instance() {
 		_d=$(docker compose ls --all --format json 2> /dev/null \
 			| grep -o '"ConfigFiles":"[^"]*"' | sed 's/^"ConfigFiles":"//; s/[",].*//' \
 			| while IFS= read -r f; do
-				grep -q '^FLUXER_DOMAIN=' "$(dirname "$f")/.env" 2> /dev/null && dirname "$f"
+				_p=$(dirname "$f")
+				if [ -f "$_p/.rexctl/state.json" ] || grep -q '^FLUXER_DOMAIN=' "$_p/.env" 2> /dev/null; then printf '%s\n' "$_p"; fi
 			done | sort -u)
 		if [ -n "$_d" ] && [ "$(printf '%s\n' "$_d" | grep -c .)" -eq 1 ]; then printf '%s' "$_d"; return 0; fi
 	fi
 	for _d in "$HOME/fluxer" /opt/fluxer; do
-		if [ -f "$_d/docker-compose.yml" ] && [ -f "$_d/.env" ]; then printf '%s' "$_d"; return 0; fi
+		if [ -f "$_d/.rexctl/state.json" ] || { [ -f "$_d/docker-compose.yml" ] && [ -f "$_d/.env" ]; }; then printf '%s' "$_d"; return 0; fi
 	done
 }
 

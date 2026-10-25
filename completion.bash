@@ -16,7 +16,12 @@ _fluxer_dir() { printf '%s' "${FLUXER_DIR:-$(dirname "$_fluxer_ops")}"; }
 _fluxer_backup_root() { printf '%s' "${BACKUP_ROOT:-$(dirname "$(_fluxer_dir)")/fluxer-backups}"; }
 
 _fluxer_services() {
-	(cd "$(_fluxer_dir)" 2>/dev/null && docker compose config --services 2>/dev/null)
+	# By the containers' labels: under rexctl the compose files do not load on their own.
+	local d p
+	d=$(_fluxer_dir)
+	p=$(grep -o '"project": *"[^"]*"' "$d/.rexctl/state.json" 2>/dev/null | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/')
+	docker ps -a --filter "label=com.docker.compose.project=${p:-$(basename "$d")}" \
+		--format '{{.Label "com.docker.compose.service"}}' 2>/dev/null | sort -u
 }
 
 _fluxer_backups() {
@@ -32,7 +37,7 @@ _fluxer() {
 
 	if [ "$COMP_CWORD" -eq 1 ]; then
 		words='status check doctor errors top voice logs up down ps restart psql valkey sh
-			changelog update autoupdate rollback prune users premium gifts badge-patch panel
+			changelog update autoupdate rollback migrate rexctl prune users premium gifts badge-patch panel
 			backup backups verify-backup restore offsite
 			notify disk env cf-ips firewall-fix install-host setup help'
 	else
@@ -42,11 +47,13 @@ _fluxer() {
 			logs) words="-f --tail --since $(_fluxer_services)" ;;
 			restart | sh) words=$(_fluxer_services) ;;
 			errors) words="--since --warn --top $(_fluxer_services)" ;;
-			update) words='--check --yes' ;;
+			update) words='--check --yes --to' ;;
+			migrate) words='--dry-run --yes' ;;
+			env) [ "$COMP_CWORD" -eq 2 ] && words='list get set unset' ;;
 			autoupdate)
 				if [ "$COMP_CWORD" -eq 2 ]; then words='on off status run'
 				else case "$sub" in on) words='--at --tz --yes' ;; run) words='--dry-run' ;; esac; fi ;;
-			changelog) words='--all' ;;
+			changelog) words='--all --summary --to' ;;
 			prune) words='--apply --keep' ;;
 			restore) words=$(_fluxer_backups) ;;
 			premium) words='--duration --subscriber --off --list --repair' ;;

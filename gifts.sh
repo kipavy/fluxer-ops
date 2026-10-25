@@ -94,7 +94,7 @@ die() { printf 'gifts: %s\n' "$*" >&2; exit 1; }
 # postgres container goes through compose, with its stderr dropped.
 psql_() {
 	if [ -z "$PG_CONTAINER" ]; then
-		PG_CONTAINER=$(cd "$FLUXER_DIR" && docker compose ps -q postgres 2> /dev/null) || PG_CONTAINER=''
+		PG_CONTAINER=$(compose ps -q postgres 2> /dev/null) || PG_CONTAINER=''
 		[ -n "$PG_CONTAINER" ] || die "the postgres service in $FLUXER_DIR is not running"
 	fi
 	docker exec -i "$PG_CONTAINER" psql -X -q -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@"
@@ -330,7 +330,7 @@ SQL
 	else
 		printf 'Created %s gift codes: %s of Plutonium each.\n\n' "$count" "$label"
 	fi
-	domain=$(env_value FLUXER_DOMAIN)
+	domain=$(fx_domain)
 	domain=${domain#*://}
 	if [ -n "$domain" ]; then
 		for c in $codes; do printf '  https://%s/gift/%s\n' "${domain%/}" "$c"; done
@@ -342,7 +342,7 @@ needs a verified email). Or apply one to an account here:
 EOF
 	else
 		for c in $codes; do printf '  %s\n' "$c"; done
-		printf '\nNo FLUXER_DOMAIN in %s/.env, so no links: the link is https://<domain>/gift/<code>.\n' "$FLUXER_DIR"
+		printf '\nCannot read the instance domain, so no links: the link is https://<domain>/gift/<code>.\n'
 		echo 'Or apply one to an account here: fluxer gifts redeem <code> <user>'
 	fi
 }
@@ -742,9 +742,9 @@ SQL
 	echo "(users service cache). Premium ends on its own when the gift runs out."
 }
 
-# One value from .env, quotes and CR stripped. Empty when unset.
+# One setting (rexctl config, or .env before rexctl). Empty when unset.
 env_value() {
-	sed -n "s/^$1=//p" "$FLUXER_DIR/.env" 2> /dev/null | tail -n 1 | tr -d '\r"' | sed "s/'//g"
+	fx_env "$1"
 }
 
 # Services whose compose config passes $1 to the container, one per line.
@@ -781,14 +781,14 @@ select (select count(*) from fluxer_kv
 SQL
 )
 	case "$found" in
-		'0 '*) echo "gifts: the Visionaries community $gid in .env no longer exists; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
-		*' 0') echo "gifts: the Visionary role $rid in .env is not in community $gid any more; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
+		'0 '*) echo "gifts: the Visionaries community $gid in the settings no longer exists; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
+		*' 0') echo "gifts: the Visionary role $rid in the settings is not in community $gid any more; run 'fluxer gifts setup-lifetime'" >&2; return 1 ;;
 	esac
-	api=$(cd "$FLUXER_DIR" && docker compose ps -q api 2> /dev/null) || api=''
+	api=$(compose ps -q api 2> /dev/null) || api=''
 	if [ -n "$api" ]; then
 		live=$(docker exec "$api" printenv FLUXER_VISIONARIES_GUILD_ID 2> /dev/null | tr -d '\r') || live=''
 		if [ "$live" != "$gid" ]; then
-			echo "gifts: .env names a Visionaries community the running api does not have yet;" >&2
+			echo "gifts: the settings name a Visionaries community the running api does not have yet;" >&2
 			echo "  run 'fluxer gifts setup-lifetime' to apply it" >&2
 			return 1
 		fi
@@ -902,19 +902,24 @@ SQL
 
 	# Register existing Visionary numbers before the api can allocate any.
 	"$OPS/premium.sh" --repair
-	"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_ID "$gid" > /dev/null
-	"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID "$rid" > /dev/null
-
-	svcs=$(services_with_env FLUXER_VISIONARIES_GUILD_ID | tr '\n' ' ')
-	[ -n "$svcs" ] || die "no service in the compose file passes FLUXER_VISIONARIES_GUILD_ID; .env is set, but nothing reads it"
-	echo "Recreating $svcs so they pick it up."
-	# shellcheck disable=SC2086 # one word per service
-	(cd "$FLUXER_DIR" && docker compose up -d $svcs 2>&1) | grep -v 'level=warning' || true
+	if fx_managed; then
+		# rexctl saves both and recreates whatever reads them.
+		echo "Setting the Visionaries community and role (rexctl recreates what reads them)."
+		fx_env_set "FLUXER_VISIONARIES_GUILD_ID=$gid" "FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID=$rid"
+	else
+		"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_ID "$gid" > /dev/null
+		"$OPS/env.sh" set FLUXER_VISIONARIES_GUILD_VISIONARY_ROLE_ID "$rid" > /dev/null
+		svcs=$(services_with_env FLUXER_VISIONARIES_GUILD_ID | tr '\n' ' ')
+		[ -n "$svcs" ] || die "no service in the compose file passes FLUXER_VISIONARIES_GUILD_ID; .env is set, but nothing reads it"
+		echo "Recreating $svcs so they pick it up."
+		# shellcheck disable=SC2086 # one word per service
+		(cd "$FLUXER_DIR" && docker compose up -d $svcs 2>&1) | grep -v 'level=warning' || true
+	fi
 	if [ "$created_role" -eq 1 ]; then
 		echo "Restarting the gateway so it loads the new role (clients reconnect within seconds)."
-		(cd "$FLUXER_DIR" && docker compose restart gateway 2>&1) | grep -v 'level=warning' || true
+		compose restart gateway 2>&1 | grep -v 'level=warning' || true
 	fi
-	lifetime_ready || die "set in .env, but not live yet; check 'fluxer ps'"
+	lifetime_ready || die "set, but not live yet; check 'fluxer ps'"
 	echo
 	echo "Lifetime links are ready. Redeemers join $gname and get the '$rname' role."
 	echo "  fluxer gifts create --duration lifetime"

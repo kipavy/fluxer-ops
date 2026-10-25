@@ -88,10 +88,17 @@ fetch ips-v6
 cat "$tmp/ips-v4" "$tmp/ips-v6" > "$tmp/cf"
 sort -u "$tmp/cf" > "$tmp/cf.sorted"
 
-[ -r "$ENV_FILE" ] || cant "cannot read $ENV_FILE"
-lines=$(grep -c "^$KEY=" "$ENV_FILE" || true)
-[ "$lines" -le 1 ] || cant "$KEY is set $lines times in $ENV_FILE - fix that by hand first"
-raw=$(sed -n "s/^$KEY=//p" "$ENV_FILE")
+if fx_managed; then
+	# rexctl keeps the setting (edge.trusted_proxies); set means set, even to default.
+	raw=$(fx_env "$KEY")
+	lines=0
+	[ -z "$raw" ] || lines=1
+else
+	[ -r "$ENV_FILE" ] || cant "cannot read $ENV_FILE"
+	lines=$(grep -c "^$KEY=" "$ENV_FILE" || true)
+	[ "$lines" -le 1 ] || cant "$KEY is set $lines times in $ENV_FILE - fix that by hand first"
+	raw=$(sed -n "s/^$KEY=//p" "$ENV_FILE")
+fi
 quote=''
 case "$raw" in
 	\"*\") quote='"'; raw=${raw#\"}; raw=${raw%\"} ;;
@@ -144,12 +151,22 @@ echo
 echo "New value:"
 printf '  %s\n' "$newline"
 if [ "$ASSUME_YES" -eq 0 ]; then
-	printf '\nBack up .env and write this line? [y/N] '
+	if fx_managed; then
+		printf '\nSet it (rexctl config set; edge is recreated, a few seconds of TLS downtime)? [y/N] '
+	else
+		printf '\nBack up .env and write this line? [y/N] '
+	fi
 	read -r reply
 	case "$reply" in
 		y | Y | yes | YES) ;;
 		*) echo "Aborted. Nothing changed."; exit 1 ;;
 	esac
+fi
+
+if fx_managed; then
+	fx_env_set "$KEY=$value"
+	echo "Set $KEY; rexctl recreated what reads it."
+	exit 0
 fi
 
 ts=$(date -u +%Y%m%dT%H%M%SZ)

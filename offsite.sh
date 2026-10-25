@@ -110,7 +110,7 @@ load_conf() {
 		*) die "$CONF: RESTIC_REPOSITORY must be s3:https://... or an absolute local path" ;;
 	esac
 
-	OFFSITE_UPLOADS_VOLUME=${OFFSITE_UPLOADS_VOLUME:-fluxer_seaweedfs-data}
+	OFFSITE_UPLOADS_VOLUME=${OFFSITE_UPLOADS_VOLUME:-$(fx_project)_seaweedfs-data}
 	OFFSITE_CACHE_VOLUME=${OFFSITE_CACHE_VOLUME:-fluxer-restic-cache}
 	OFFSITE_HOST=${OFFSITE_HOST:-$(hostname)}
 	OFFSITE_KEEP_DAILY=${OFFSITE_KEEP_DAILY:-14}
@@ -216,7 +216,7 @@ cmd_push() {
 		esac
 	fi
 	[ -f "$d/fluxer.dump" ] || die "no fluxer.dump in $d"
-	[ -f "$d/.env" ] || printf 'WARNING: %s has no .env; this snapshot alone cannot be restored\n' "$d" >&2
+	[ -f "$d/.env" ] || [ -f "$d/rexctl/state.json" ] || printf 'WARNING: %s has no settings (.env or rexctl/state.json); this snapshot alone cannot be restored\n' "$d" >&2
 	push_name=$(basename "$d")
 	docker volume inspect "$OFFSITE_UPLOADS_VOLUME" > /dev/null 2>&1 \
 		|| die "uploads volume $OFFSITE_UPLOADS_VOLUME does not exist"
@@ -306,9 +306,9 @@ Restored into $target/backup, a backup directory like any auto-* one:
 $(cd "$target/backup" && ls -A | sed 's/^/  /')
 
 Next steps:
-  1. Read $target/backup/.env against the live .env. A restore onto a
-     fresh host needs this .env in place first: it holds the database and
-     object-store secrets.
+  1. Read the settings in $target/backup (rexctl/state.json, or .env from before
+     rexctl) against the live ones. A restore onto a fresh host needs them in place
+     first: they hold the database and object-store secrets.
   2. Prove the dump restores without touching live (verify-backup checks the
      newest backup, which a fresh copy is):
        cp -r $target/backup $BACKUP_ROOT/offsite-restore && fluxer verify-backup

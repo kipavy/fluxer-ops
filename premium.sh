@@ -67,7 +67,7 @@ die() { printf 'premium: %s\n' "$*" >&2; exit 1; }
 # stderr, which would end up mixed into captured output.
 psql_() {
 	if [ -z "$PG_CONTAINER" ]; then
-		PG_CONTAINER=$(cd "$FLUXER_DIR" && docker compose ps -q postgres 2> /dev/null) || PG_CONTAINER=''
+		PG_CONTAINER=$(compose ps -q postgres 2> /dev/null) || PG_CONTAINER=''
 		[ -n "$PG_CONTAINER" ] || die "the postgres service in $FLUXER_DIR is not running"
 	fi
 	docker exec -i "$PG_CONTAINER" psql -X -q -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@"
@@ -183,7 +183,7 @@ ensure_badge_patch() {
 # The client shows no premium at all unless the instance reports premium_enabled
 # (admin panel, premium mode 'mirror'). Silent when the check itself cannot run.
 warn_if_premium_hidden() {
-	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" 2> /dev/null | head -n 1 | tr -d '\r"' | sed "s/'//g")
+	domain=$(fx_domain 2> /dev/null)
 	domain=${domain#*://}
 	[ -n "$domain" ] || return 0
 	wk=$(curl -s --max-time 10 "https://${domain%/}/.well-known/fluxer" 2> /dev/null) || return 0

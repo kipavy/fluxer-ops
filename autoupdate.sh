@@ -1,11 +1,10 @@
 #!/bin/sh
 # autoupdate.sh - run `fluxer update` on a schedule, but only when there is one.
 #
-# An update stops the stack (the installer's cold backup, then the recreate), so
-# updating every night would cost a downtime every night for nothing. Each run
-# first asks whether anything changed: the registry digest of every fluxer-*
-# image against what runs here, and the stack files install.sh would refresh.
-# Nothing new, which is most nights: nothing happens. Something new:
+# An update costs a downtime (rexctl's backup, then the recreate), so updating every
+# night would cost one every night for nothing. Each run first asks rexctl whether a
+# newer release exists (rexctl upgrade --check). Nothing new, which is most nights:
+# nothing happens. Something new:
 # changelog.sh --summary, then update.sh --yes (overlay off and back on, health
 # checks), then the changelog goes to a channel (AUTOUPDATE_WEBHOOK_URL), in
 # French, as one short message: versions, a summary from a cheap model on
@@ -14,8 +13,8 @@
 # and a new major tag are posted too, and failures go to notify.sh as well. After a failure, automatic updates PAUSE until `on` is
 # run again: retrying every night on a broken stack helps nobody.
 #
-# Not followed automatically: a new major image tag (v1 -> v2). It is announced
-# once in the channel; moving FLUXER_IMAGE_TAG stays a human decision.
+# A release rexctl cannot reach directly (it reports it blocked: one in between is
+# needed first) is reported as a check failure, never forced.
 #
 # cron fires every hour at the chosen minute and the run goes on only when the
 # hour in --tz matches, so a DST change needs no crontab edit. The host clock is
@@ -36,9 +35,8 @@ set -eu
 # Every outside command is a variable, so tests run against stubs.
 STATE=${AUTOUPDATE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/fluxer-autoupdate}
 CRONTAB=${CRONTAB:-crontab}
-DOCKER=${DOCKER:-docker}
-REGISTRY=${REGISTRY:-python3 $OPS/registry.py}
-INSTALL_DRY=${INSTALL_DRY:-sh install.sh --update --dry-run}
+# rexctl's answer, as JSON: {"current", "latest", "available", "blocked", "min_from"...}
+UPGRADE_CHECK=${UPGRADE_CHECK:-}
 UPDATE=${UPDATE:-$OPS/update.sh}
 CHANGELOG=${CHANGELOG:-$OPS/changelog.sh}
 NOTIFY=${NOTIFY:-$OPS/notify.sh}
@@ -50,8 +48,6 @@ SUDO_CHECK=${SUDO_CHECK:-sudo -n true}
 PGREP=${PGREP:-pgrep}
 SLEEP=${SLEEP:-sleep}
 NOTIFY_CONF=${NOTIFY_CONF:-$OPS/notify.conf}
-# The image whose tags say whether a new major exists. Every component is tagged together.
-MAJOR_PROBE=ghcr.io/fluxerapp/fluxer-api
 WAIT_BACKUP=1800
 
 conf_value() { # KEY from notify.conf, quotes stripped
@@ -64,7 +60,6 @@ AUTOUPDATE_AI_MODEL=${AUTOUPDATE_AI_MODEL:-$(conf_value AUTOUPDATE_AI_MODEL)}
 # Cheap and good at French: about $0.0005 per update at OpenRouter's prices (2026-10).
 AUTOUPDATE_AI_MODEL=${AUTOUPDATE_AI_MODEL:-anthropic/claude-haiku-5.5}
 
-env_value() { sed -n "s/^$1=//p" "$FLUXER_DIR/.env" | head -n 1; }
 stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 log() { mkdir -p "$STATE"; printf '%s %s\n' "$(stamp)" "$*" >> "$STATE/log"; }
 record() { mkdir -p "$STATE"; printf '%s %s\n' "$(stamp)" "$*" > "$STATE/last"; }
@@ -73,7 +68,7 @@ cron_ours() { $CRONTAB -l 2> /dev/null | grep -F "$(marker)" || true; }
 cron_others() { $CRONTAB -l 2> /dev/null | grep -vF "$(marker)" || true; }
 
 live_version() {
-	$CURL -sS -I --max-time 15 "https://$(env_value FLUXER_DOMAIN)/api/_health" 2> /dev/null \
+	$CURL -sS -I --max-time 15 "https://$(fx_domain)/api/_health" 2> /dev/null \
 		| sed -n 's/^[Xx]-[Ff]luxer-[Vv]ersion: *//p' | tr -d '\r' | grep . || echo unknown
 }
 
@@ -122,75 +117,44 @@ print("\n".join(lines)[:1500])
 ' 2> /dev/null || log "AI summary skipped (OpenRouter call failed)"
 }
 
-# What counts as an update. Prints one reason per line.
+# What counts as an update: a newer release than the one running, as rexctl sees it.
+# Prints one reason per line.
 # Returns 0 = an update is pending, 1 = nothing new, 2 = cannot tell (why on stderr).
 detect() {
+	if [ -z "$UPGRADE_CHECK" ] && ! fx_managed; then
+		echo "rexctl does not manage $FLUXER_DIR yet (upstream retired the old installer): run fluxer migrate" >&2
+		return 2
+	fi
 	_t=$(mktemp -d)
-	_rc=1
-	if ! (cd "$FLUXER_DIR" && $DOCKER compose ps -aq) > "$_t/ids" 2> "$_t/err" || [ ! -s "$_t/ids" ]; then
-		echo "no containers to compare (docker compose ps: $(tail -n 1 "$_t/err"))" >&2
+	_crc=0
+	if [ -n "$UPGRADE_CHECK" ]; then
+		$UPGRADE_CHECK > "$_t/check" 2> "$_t/err" || _crc=$?
+	else
+		rexctl -q upgrade --check --json > "$_t/check" 2> "$_t/err" || _crc=$?
+	fi
+	if [ "$_crc" -ne 0 ] || [ ! -s "$_t/check" ]; then
+		echo "rexctl upgrade --check failed: $(tail -n 1 "$_t/err")" >&2
 		rm -rf "$_t"; return 2
 	fi
-	# The image each container was created from, and the digests it was pulled as.
-	xargs $DOCKER inspect --format '{{.Config.Image}} {{.Image}}' < "$_t/ids" | sort -u > "$_t/running"
-	: > "$_t/fluxer"
-	while read -r image id; do
-		case "$image" in */fluxer-*) ;; *) continue ;; esac
-		printf '%s %s\n' "$image" "$($DOCKER image inspect --format '{{join .RepoDigests ","}}' "$id")" >> "$_t/fluxer"
-	done < "$_t/running"
-	platform=$($DOCKER version --format '{{.Server.Os}}/{{.Server.Arch}}' 2> /dev/null || echo linux/amd64)
-	# shellcheck disable=SC2046 # one argument per image reference, none has spaces
-	$REGISTRY manifests "$platform" $(awk '{ print $1 }' "$_t/fluxer") > "$_t/remote" 2> "$_t/err" || true
-	while read -r image digests; do
-		read -r _ rver _ rdigest status <<-EOF
-		$(awk -v r="$image" '$1 == r' "$_t/remote")
-		EOF
-		comp=${image##*/}
-		if [ "${status:-}" != ok ]; then
-			echo "registry, $comp: ${status:-no answer} $(tail -n 1 "$_t/err")" >&2
-			_rc=2
-		elif ! printf '%s' "$digests" | tr ',' '\n' | grep -q "@$rdigest\$"; then
-			echo "new image: ${comp%:*} ${rver:-}"
-			[ "$_rc" -eq 2 ] || _rc=0
-		fi
-	done < "$_t/fluxer"
-
-	# The stack files, as install.sh itself lists them. A change to .env.example
-	# alone (a new optional setting) is not worth a downtime; it rides along with
-	# the next real update.
-	if ! (cd "$FLUXER_DIR" && $INSTALL_DRY) > "$_t/dry" 2>&1; then
-		echo "install.sh --update --dry-run failed: $(tail -n 1 "$_t/dry")" >&2
-		rm -rf "$_t"; return 2
-	fi
-	awk '$1 != "file" && NF == 2 && $2 == "changes" { print "changed", $1 }
-		NF == 3 && $2 == "is" && $3 == "unchanged" { print "same", $1 }' "$_t/dry" > "$_t/files"
-	if [ ! -s "$_t/files" ]; then
-		echo "could not read install.sh's list of stack files (its dry-run output changed?)" >&2
-		rm -rf "$_t"; return 2
-	fi
-	while read -r what f; do
-		[ "$what" = changed ] && [ "$f" != .env.example ] || continue
-		echo "stack file changed upstream: $f"
-		[ "$_rc" -eq 2 ] || _rc=0
-	done < "$_t/files"
+	_rc=0
+	python3 - "$_t/check" <<'PY' || _rc=$?
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except ValueError as e:
+    print(f"rexctl upgrade --check said something that is not JSON ({e})", file=sys.stderr)
+    sys.exit(2)
+cur, new = d.get("current") or "?", d.get("latest") or "?"
+if not d.get("available"):
+    sys.exit(1)
+if d.get("blocked"):
+    need = f" (it needs {d['min_from']} or newer first)" if d.get("min_from") else ""
+    print(f"release {new} is out but rexctl cannot upgrade {cur} to it directly{need}", file=sys.stderr)
+    sys.exit(2)
+print(f"new release: {cur} -> {new}")
+PY
 	rm -rf "$_t"
 	return "$_rc"
-}
-
-# A new major tag is announced once and never followed.
-check_major() {
-	tag=$(env_value FLUXER_IMAGE_TAG)
-	n=${tag:-v1}; n=${n#v}
-	case "$n" in '' | *[!0-9]*) return 0 ;; esac
-	next="v$((n + 1))"
-	[ -e "$STATE/announced-$next" ] && return 0
-	if $REGISTRY tags "$MAJOR_PROBE" 2> /dev/null | grep -qx "$next"; then
-		printf '%s\n' "**Nouvelle version majeure : $next** (cette instance suit ${tag:-v1})." \
-			"Pas appliquée automatiquement : une version majeure peut demander des étapes manuelles." \
-			"Lire les notes upstream, puis : \`fluxer env set FLUXER_IMAGE_TAG $next && fluxer update\`" | post
-		log "announced the new major tag $next"
-		mkdir -p "$STATE"; : > "$STATE/announced-$next"
-	fi
 }
 
 cmd_on() {
@@ -218,13 +182,13 @@ WARNING: automatic updates apply upstream changes with nobody watching.
 
   - Every night at $at ($tz) this checks for a new release. Most nights there is
     none and nothing happens. When there is one, it is applied right away:
-    a few minutes of DOWNTIME (the installer's backup, then the recreate).
+    a few minutes of DOWNTIME (rexctl's backup, then the recreate).
   - Upstream publishes no release notes: what gets applied is not reviewed
     first. The changelog is posted to the channel afterwards, not before.
   - There is no automatic rollback. A failed update leaves the instance as
     update.sh left it, pauses automatic updates, and alerts. You roll back
     by hand (fluxer rollback).
-  - A new major tag (v1 -> v2) is announced, never applied.
+  - A release rexctl cannot reach in one step is reported, never forced.
 EOF
 	if [ -z "$AUTOUPDATE_WEBHOOK_URL" ]; then
 		printf '\nNote: AUTOUPDATE_WEBHOOK_URL is not set (notify.conf), so no changelog will be posted.\n'
@@ -307,8 +271,6 @@ cmd_run() {
 		waited=$((waited + 30))
 	done
 
-	[ "$dry" -eq 1 ] || check_major
-
 	rc=0
 	reasons=$(detect 2> "$STATE/detect.err") || rc=$?
 	if [ "$rc" -eq 2 ]; then
@@ -320,7 +282,7 @@ cmd_run() {
 		if [ ! -e "$STATE/check-failing" ]; then
 			printf '%s\n' "$msg" > "$STATE/check-failing"
 			printf '**⚠️ Vérification des mises à jour impossible** sur %s\n%s\n%s\n' \
-				"$(env_value FLUXER_DOMAIN)" "\`$(tr '\n' ' ' < "$STATE/detect.err")\`" \
+				"$(fx_domain)" "\`$(tr '\n' ' ' < "$STATE/detect.err")\`" \
 				"Aucune mise à jour appliquée. Nouvel essai chaque nuit, sans nouveau message jusqu'au retour à la normale." | post
 		fi
 		record "could not check"
@@ -328,7 +290,7 @@ cmd_run() {
 	fi
 	if [ "$dry" -eq 0 ] && [ -e "$STATE/check-failing" ]; then
 		rm -f "$STATE/check-failing"
-		printf '✅ Vérification des mises à jour rétablie sur %s.\n' "$(env_value FLUXER_DOMAIN)" | post
+		printf '✅ Vérification des mises à jour rétablie sur %s.\n' "$(fx_domain)" | post
 	fi
 	if [ "$rc" -eq 1 ]; then
 		[ "$dry" -eq 1 ] && { echo "Nothing new: no update to apply."; return 0; }
@@ -350,19 +312,16 @@ cmd_run() {
 	urc=0
 	$UPDATE --yes > "$t/update.log" 2>&1 || urc=$?
 	sed 's/^/    /' "$t/update.log" >> "$STATE/log"
-	domain=$(env_value FLUXER_DOMAIN)
+	domain=$(fx_domain)
 
 	if [ "$urc" -eq 0 ]; then
 		after=$(live_version)
 		ai_summary < "$t/changelog" > "$t/ai"
-		images=$(printf '%s\n' "$reasons" | grep -c '^new image' || true)
-		files=$(printf '%s\n' "$reasons" | sed -n 's/^stack file changed upstream: //p' | tr '\n' ' ')
+		release=$(printf '%s\n' "$reasons" | sed -n 's/^new release: //p' | head -n 1)
 		{
 			printf '**Fluxer mis à jour** sur %s : %s → %s\n' "$domain" "$before" "$after"
-			trigger=''
-			[ "$images" -eq 0 ] || trigger="$images nouvelle(s) image(s)"
-			[ -z "$files" ] || trigger="${trigger:+$trigger, }modifié : ${files% }"
-			printf '_Déclencheur : %s_\n\n' "$trigger"
+			[ -z "$release" ] || printf '_Release %s_\n' "$release"
+			printf '\n'
 			# The summary, or without one the heads-up section (breaking changes,
 			# reverts, removals); the full list is one click away, upstream.
 			if [ -s "$t/ai" ]; then

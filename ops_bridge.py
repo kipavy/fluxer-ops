@@ -267,12 +267,20 @@ def docker_psql(fluxer_dir):
     variables (:'id' is quoted by psql itself), never into the SQL text."""
     def psql(sql, variables):
         pg = os.environ.get('PG_CONTAINER')
-        cmd = ['docker', 'exec', '-i', pg] if pg else ['docker', 'compose', 'exec', '-T', 'postgres']
+        # Under rexctl the compose files refuse to load outside it: reach the running
+        # project by name instead (panel.sh puts FLUXER_PROJECT in the unit).
+        project = os.environ.get('FLUXER_PROJECT')
+        if pg:
+            cmd = ['docker', 'exec', '-i', pg]
+        elif project:
+            cmd = ['docker', 'compose', '-p', project, 'exec', '-T', 'postgres']
+        else:
+            cmd = ['docker', 'compose', 'exec', '-T', 'postgres']
         cmd += ['psql', '-X', '-q', '-At', '-U', 'fluxer', '-d', 'fluxer', '-v', 'ON_ERROR_STOP=1']
         for key, value in variables.items():
             cmd += ['-v', f'{key}={value}']
         try:
-            p = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=30, cwd=fluxer_dir)
+            p = subprocess.run(cmd, input=sql, capture_output=True, text=True, timeout=30, cwd='/' if project else fluxer_dir)
         except (OSError, subprocess.SubprocessError) as e:
             raise UpstreamError(f'database check failed: {e}') from e
         if p.returncode != 0:
@@ -532,9 +540,11 @@ def main(argv=None):
     opts = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(message)s')
     fluxer_dir = os.environ.get('FLUXER_DIR') or os.path.dirname(OPS)
-    domain = env_value(os.path.join(fluxer_dir, '.env'), 'FLUXER_DOMAIN')
+    # rexctl keeps no .env: panel.sh puts the domain in the unit. An old-installer
+    # instance still has it in .env.
+    domain = os.environ.get('FLUXER_DOMAIN') or env_value(os.path.join(fluxer_dir, '.env'), 'FLUXER_DOMAIN')
     if not domain:
-        log.error('no FLUXER_DOMAIN in %s/.env', fluxer_dir)
+        log.error('no FLUXER_DOMAIN in the environment or in %s/.env', fluxer_dir)
         return 2
     bridge = Bridge(Identity(domain, psql=docker_psql(fluxer_dir)), domain, audit=make_audit(OPS))
     server = serve(opts.socket, bridge)
