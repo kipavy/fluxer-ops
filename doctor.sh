@@ -6,7 +6,7 @@
 # serving, and recoverable, next week": the watchdog is actually scheduled, the
 # backups are fresh and complete and not only on this disk, someone gets told
 # when things break, Docker survives firewalld, Cloudflare's ranges are trusted,
-# the badge patch still matches the image under it, certificates are not about
+# the Ops panel still has its route and bridge, certificates are not about
 # to lapse, and a rollback still has its images. Every one of these fails
 # silently, which is how the instance was down for two weeks in Sept 2026.
 #
@@ -289,10 +289,6 @@ check_cf_ips() {
 	esac
 }
 
-# Compare the badge patch with the image it was built from. badge-patch.sh
-# records the stock chunk it patched in ops/patches/chunk.name; if that chunk is
-# gone from the current app-proxy image, the mounted index.html points into a
-# release that is no longer there.
 # Every file the override mounts must exist: a missing bind source makes docker
 # create an empty root-owned directory in its place, and app-proxy or edge then serves
 # a directory where index.html or the Caddyfile should be.
@@ -328,43 +324,8 @@ EOF
 	fi
 }
 
-check_badge_patch() {
-	if [ ! -s "$OPS/patches/patched.names" ]; then
-		ok "badge patch not applied (stock bundle)"
-		return
-	fi
-	chunk=$(cat "$OPS/patches/chunk.name" 2> /dev/null || true)
-	patched=$(cat "$OPS/patches/patched.name" 2> /dev/null || true)
-	case "$chunk" in
-		*[!A-Za-z0-9._-]* | .*) chunk='' ;;
-		?*.js) ;;
-		*) chunk='' ;;
-	esac
-	if [ -z "$chunk" ]; then
-		fail "ops/patches/chunk.name is missing or malformed" "fluxer badge-patch"
-		return
-	fi
-	if [ -z "$patched" ] || ! grep -qF "/assets/$patched" "$OPS/patches/index.html" 2> /dev/null; then
-		fail "patched index.html does not reference the patched chunk ${patched:-?}" "fluxer badge-patch"
-		return
-	fi
-	image=$(fx_image app-proxy 2> /dev/null) || image=''
-	if [ -z "$image" ] || ! docker image inspect "$image" > /dev/null 2>&1; then
-		skip "badge patch vs image (cannot resolve the app-proxy image)"
-		return
-	fi
-	if timeout 30 docker run --rm --pull never --entrypoint sh "$image" \
-		-c "test -f /srv/app/static/assets/$chunk" > /dev/null 2>&1; then
-		ok "badge patch matches the app-proxy image (stock chunk $chunk is still in it)"
-	else
-		fail "badge patch was built from a different release: $chunk is not in $image" \
-			"fluxer badge-patch"
-	fi
-}
-
-# The Ops panel: the bridge answers, and the Caddyfile copy is still upstream's plus
-# our marked block. Upstream may change its Caddyfile on any update; a stale copy
-# would silently drop whatever the new one adds.
+# The Ops panel: the bridge answers, its route is in caddy.d/, and edge really
+# routes /ops-api/ to it (the app answers every unknown path with 200 and its html).
 check_panel() {
 	if [ ! -f "$OPS/panel/enabled" ]; then
 		ok "Ops panel off"
@@ -576,7 +537,6 @@ check_uploads
 check_notify
 check_cf_ips
 check_overlay
-check_badge_patch
 check_panel
 check_rexctl
 check_rexctl_contract

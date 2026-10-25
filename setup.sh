@@ -426,16 +426,14 @@ link_step() { # <name> <link> <target>
 
 # README and lib.sh both say a Fluxer found through Docker is fine to point at,
 # from anywhere. That is true for most of ops/ - every script takes FLUXER_DIR
-# from lib.sh - but not for everything: badge-patch.sh's compose override, and
-# `fluxer update`'s re-apply of it, and backup.sh's `cp -r ops` all assume ops/
+# from lib.sh - but not for everything: backup.sh's `cp -r ops` assumes ops/
 # sits at $FLUXER_DIR/ops. Say so plainly rather than let any of those surprise
 # someone later. Not a MISSING: the instance itself is fine, only these are not.
 check_ops_layout() {
 	[ -n "$FLUXER_DIR" ] || return 0
 	[ "$OPS" = "$FLUXER_DIR/ops" ] && return 0
 	st_skip "ops/ is at $OPS, not $FLUXER_DIR/ops"
-	say "    Degraded because of that: \`fluxer badge-patch\` (and update's re-apply of it) will"
-	say "    not find its files there, and nightly backups will not include ops/. Everything"
+	say "    Degraded because of that: nightly backups will not include ops/. Everything"
 	say "    else (finding the instance, cron, backups of the instance itself) still works."
 }
 

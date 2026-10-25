@@ -43,9 +43,8 @@ git clone https://github.com/kipavy/fluxer-ops ~/fluxer/ops
 
 Already running Fluxer somewhere else than `~/fluxer`? It is found through Docker, or
 point at it: `FLUXER_DIR=/path/to/fluxer` before either command. That is enough for
-`fluxer setup`, `check`, `backup` and the rest, but `fluxer badge-patch` (and
-`update`'s re-apply of it) and backups including `ops/` itself still expect this
-checkout at `<instance>/ops`; `setup.sh` says so if it is not.
+`fluxer setup`, `check`, `backup` and the rest, but backups including `ops/` itself
+still expect this checkout at `<instance>/ops`; `setup.sh` says so if it is not.
 
 ### If the first install does not come up
 
@@ -62,7 +61,7 @@ checkout at `<instance>/ops`; `setup.sh` says so if it is not.
 Upstream ships **`rexctl`** (since 2026-10-25; it replaced `install.sh`), which
 handles **installs, upgrades, rollback, settings, start/stop**, accounts and its own
 backups. It does not watch the instance, schedule or off-site backups, alert anyone,
-or know about anything this repository adds (premium, gifts, the badge patch, the Ops
+or know about anything this repository adds (premium, gifts, the Ops
 panel, the changelog channel). These scripts fill that gap, **on top of rexctl**: they
 go through its public commands only (`rexctl config`, `upgrade --check --json`,
 `start`, `rollback`...) and its two extension points, `custom.compose.yml` and
@@ -86,9 +85,8 @@ instance through `lib.sh` only:
 
 **Which one to type.** `fluxer`, by default: it calls rexctl itself and adds what
 rexctl cannot know about. In particular, **update and roll back with `fluxer update` /
-`fluxer rollback`, never `rexctl upgrade` / `rexctl rollback` directly**: the badge
-patch and the Ops panel mount an `index.html` naming the running release's chunks, so
-they must come off before the release changes and back on after, which only `fluxer`
+`fluxer rollback`, never `rexctl upgrade` / `rexctl rollback` directly**: the Ops
+panel mounts an `index.html` naming the running release's chunks, so it must come off before the release changes and back on after, which only `fluxer`
 does. Use `rexctl` (or `fluxer rexctl ...`) for what `fluxer` has no command for:
 `admins`, `invites`, `registration`, `email`, `branding`, `config list`.
 
@@ -109,7 +107,7 @@ it works from any directory. `fluxer help` is the full list; the shape of it:
 Health    status [--json]  check  doctor  errors  top  voice
 Stack     logs  up  down  ps  restart  psql  valkey  sh <svc>
 Updates   changelog  update  rollback  autoupdate  prune  migrate  rexctl
-Accounts  users  premium  gifts  badge-patch
+Accounts  users  premium  gifts
 Backups   backup  backups  verify-backup  restore  offsite
 Host      notify  disk  env  cf-ips  firewall-fix  setup  panel
 ```
@@ -141,14 +139,13 @@ Three commands are worth knowing before you need them:
 | `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + settings (`.rexctl/state.json`, or `.env` before rexctl) + `custom.compose.yml`, `caddy.d/` + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. Hot: no downtime, unlike `rexctl backup`. |
 | `update.sh` | you, when updating; `autoupdate.sh` | Around `rexctl upgrade`: iptables preflight, the plan, asks, overlay off, upgrade, `check.sh`, overlay back on. `--to V` for a given release. |
 | `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when `rexctl upgrade --check` reports a newer release; posts the changelog to a channel, pauses itself after a failure. |
-| `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
-| `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
-| `overlay.sh` | `badge-patch.sh`, `panel.sh`, `update.sh` | The one writer of `custom.compose.yml`, the panel route in `caddy.d/` and the served `index.html`: composes the badge patch and the Ops panel, applied with `rexctl start`. `suspend` drops it for an update. |
+| `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length. One command, start to finish. |
+| `overlay.sh` | `panel.sh`, `update.sh` | The one writer of `custom.compose.yml`, the panel route in `caddy.d/` and the served `index.html` for the Ops panel, applied with `rexctl start`. `suspend` drops it for an update. |
 | `panel.sh` | you, `update.sh` (`refresh`) | The in-app STAFF Ops panel: bridge unit, Caddy route (`caddy.d/fluxer-ops-panel.caddy`), script. `off` is the kill switch. |
 | `ops_bridge.py` | systemd (`fluxer-ops-bridge`) | Runs allowlisted commands for the Ops panel after checking the session and STAFF. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
-| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, the client overlay (compose file and its mounts) and the Ops panel (bridge, route), `rexctl doctor`, rollback images. |
+| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, the client overlay (compose file and its mounts) and the Ops panel (bridge, route), `rexctl doctor`, rollback images. |
 | `firewall-fix.sh` | you, once | Diagnoses Docker vs firewalld on this host; `--apply` installs the systemd drop-in that fixes it. |
 | `cf-ips.sh` | you, `doctor.sh` | Compares the trusted proxies (`edge.trusted_proxies`) with Cloudflare's published ranges; `--apply` sets them (`rexctl config set`). |
 | `users.sh` | you | List and inspect accounts, set STAFF, mark an email verified, instance counts. |
@@ -284,8 +281,8 @@ everything that fails silently until the day it matters: the DOCKER chain and th
 firewall fix, whether dockerd can still hear firewalld, both crontabs, the `fluxer`
 symlink, backup age, contents and last run, free disk and where 14-day retention is
 heading, uploads size against the 1 GB restic trigger, off-site backups,
-notification channels, Cloudflare ranges, the badge patch against the app-proxy
-image it was built from, the Cloudflare edge and Caddy origin certificates (warn
+notification channels, Cloudflare ranges, the Ops panel, rexctl's own checks and
+what fluxer-ops needs from rexctl, the Cloudflare edge and Caddy origin certificates (warn
 under 14 days, FAIL under 3), and whether rollback's recorded images are still on
 disk.
 
@@ -304,7 +301,7 @@ fluxer update        # preflight, plan, ask, apply, verify
 `fluxer update` wraps `rexctl upgrade`, which updates rexctl itself first, backs up,
 pulls the new release's pinned images, migrates and recreates, and keeps what
 `rexctl rollback` needs. Around it `fluxer update` runs the iptables preflight, takes
-the client overlay (badge patch, Ops panel) off and puts it back on the new release,
+the client overlay (the Ops panel) off and puts it back on the new release,
 and runs `check.sh`. `--check` shows the plan only; `--to <version>` picks a release.
 
 Upstream publishes no release notes. A release is one git tag,
@@ -393,118 +390,15 @@ roll back with `fluxer rollback` if needed, and `fluxer autoupdate on` resumes.
 without passwordless sudo: cron cannot type a password. State and log live in
 `~/.local/state/fluxer-autoupdate/`.
 
-## The Visionary badge patch
+## Premium and the Visionary badge: `fluxer premium`
 
-On a fresh instance, from nothing to a badge:
-
-```sh
-fluxer premium <username>   # lifetime: sets the account up and applies the patch
-```
-
-then reload the client. It changes the **web app** served by this instance; the
-desktop and mobile apps ship their own copy of the client and keep showing the
-Plutonium badge with "subscriber since". The rest of this section is why the patch
-is needed at all, and what it does.
-
-The **Plutonium badge** needs no patch since the 2026-10 releases: the client shows
-it whenever the instance reports `premium_enabled`, i.e. the admin panel's premium
-mode is `mirror`. In `everyone` mode (the self-hosted default) the client hides
-premium altogether, badge included; `fluxer premium` warns when that is the case.
-
-What the client still hides on a self-hosted instance are the **Visionary** extras:
-the "Visionary since" tooltip and the "Visionary ID #N" badge. `UserProfileBadges.tsx`:
-
-```ts
-if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME) { /* Visionary tooltip */ }
-...
-if (!selfHosted && profile.premiumType === UserPremiumTypes.LIFETIME && profile.premiumLifetimeSequence != null)
-```
-
-so no amount of account state brings them back. Everything else is already in
-place: the API serves `premium_type`, `premium_since` and
-`premium_lifetime_sequence` to profile viewers on any instance (stripped only for
-`BADGE_HIDDEN` or a restricted profile). Earlier releases gated the whole premium
-badge the same way (`!selfHosted && profile?.premiumType && ...`); the patch still
-removes that gate when a bundle has it.
-
-There is no setting for it, and flipping `FLUXER_SELF_HOSTED` is not an option --
-it also drives the setup flow, registration and the Stripe paths. So
-`badge-patch.sh` edits the shipped bundle:
-
-1. Finds the one content-hashed chunk in the **app-proxy image** that holds the
-   gates, and copies it out along with `index.html` (from the image, never from the
-   running container, so a re-run starts from pristine bytes).
-2. Deletes `!selfHosted` from each gate it finds (each at most once, at least one),
-   matching on the *shape* of the minified expression rather than on a release's
-   variable names.
-3. Publishes the result under a **new, content-derived name**
-   (`<chunk>.<sha8>.js`, plus `.br` and `.gz` -- app-proxy serves whichever
-   precompressed sibling the browser asks for) and rewrites `index.html` to point
-   at it. The stock chunk stays in the image and simply stops being loaded.
-   Since the 2026-10 releases the chunk is **lazy-loaded**: `index.html` only
-   preloads it, and the module runtime fetches it by its stock name. So every file
-   that loads the chunk by name (the runtime) is repointed and republished the same
-   way, and `index.html` loads that copy instead. Patching the chunk alone serves the
-   patched file but runs the stock one -- the badge stays unchanged. A loader that
-   `index.html` does not load itself is refused rather than guessed at.
-4. Bind-mounts those files through `custom.compose.yml` (rexctl loads it after its
-   own files; `overlay.sh` writes it), then proves app-proxy serves the patched
-   bytes in all three encodings and that both the origin and public HTML reference
-   the new chunk.
-
-The image is never modified. `fluxer badge-patch --revert` removes the override and
-the patched files; the stock `index.html` then points back at the stock chunk.
-
-### Why a new filename instead of overwriting the chunk
-
-This is the part worth keeping. Bundle chunks are served
-`cache-control: public, max-age=31536000, immutable`, so overwriting one in place
-leaves browsers and CDN edges serving the pre-patch bytes from a URL that, by
-contract, never revalidates. That was not theoretical here: with the origin
-provably patched in every encoding, and Cloudflare's cache for that exact URL
-purged and re-verified from this host, the badge still did not appear in the
-browser -- including a fresh incognito window. The same patch published under a new
-filename appeared immediately.
-
-`index.html` is `no-cache` and comes back `cf-cache-status: DYNAMIC`, so a new
-chunk name is picked up on the next page load, everywhere, with nothing to purge.
-Note that app-proxy **templates `index.html` on every request** (it injects
-`__FLUXER_CONFIG__`) and does not serve the precompressed HTML siblings, so the
-mounted file is a template, not a served artifact.
-
-One cosmetic consequence: `sw.js` still lists the stock chunk in its precache
-manifest, so the service worker caches a file nothing loads.
-
-### Keeping it applied
-
-The mounted `index.html` names a release-specific chunk, so it must **not** stay
-mounted while the app image changes underneath it. `rexctl upgrade` recreates the
-stack with `custom.compose.yml` still loaded, so the new image would be served an
-`index.html` pointing at chunks it does not have -- the page answers 200 and the app
-loads nothing. So:
-
-- **`fluxer update`** reverts the patch before applying, re-applies after the
-  health checks pass, and if the update itself fails leaves the patch off and says
-  so. Off is a working app without the Visionary extras (the Plutonium badge itself
-  needs no patch).
-- **`fluxer rollback`** does the same around `rexctl rollback`, for the mirror
-  image of the problem: a patch built from the newer release names chunks the older
-  one never had.
-- **`fluxer check`** verifies every `<script src>` in the served shell resolves, so
-  this breakage is caught however it arises -- including someone running
-  `rexctl upgrade` directly, around the patch. That check is the reason it is in
-  `check.sh` and not only in `update.sh`: the watchdog runs `check.sh` every ten
-  minutes, so a broken shell surfaces on its own rather than waiting to be noticed.
-
-Anything else that changes the app image needs `fluxer badge-patch` by hand. A
-re-run on unchanged content republishes to the same URL, so it is safe any time.
-
-Worth knowing: **app-proxy reads `index.html` once at startup** and templates it
-per request from memory, so editing the mounted file changes nothing until the
-container is recreated. `badge-patch.sh` always recreates it; a hand edit will look
-like it did nothing.
-
-### Granting it: `fluxer premium`
+Since 2026.1025 the api builds the profile badges itself and the stock client shows
+them on a self-hosted instance, Visionary badge and `#N` included, so granting the
+account state is all it takes (until then this repository patched the web bundle;
+that is gone). The client does hide every premium badge unless the instance reports
+`premium_enabled`, i.e. the admin panel's premium mode is `mirror`; in `everyone`
+mode (the self-hosted default) premium is hidden altogether, and `fluxer premium`
+warns when that is the case.
 
 ```sh
 fluxer premium <user>                   # lifetime: Visionary badge and number
@@ -516,8 +410,7 @@ fluxer premium --repair                 # keep lifetime grants from being stripp
 ```
 
 `<user>` is a username, or `username#tag` when several accounts share the name.
-That is the whole flow -- a lifetime grant applies the badge patch itself if it is
-not on yet, so a fresh instance needs one command and a page reload.
+That is the whole flow: one command and a page reload.
 
 `--duration` is a gift code minted and redeemed in one go, so it follows the gift
 rules below exactly: it stacks after a running time-limited grant, and it is refused
@@ -558,8 +451,7 @@ client reload is enough -- no restart. The `users` service does cache them for 3
 
 `--off` mirrors the api's own `PREMIUM_CLEAR_FIELDS` and deliberately leaves
 `premium_lifetime_sequence` (and its slot) alone: a Visionary ID is an identity, not
-an entitlement. It also leaves the badge patch in place, since other accounts may be
-using it.
+an entitlement.
 
 `--repair` covers an upstream gap. Redeeming a lifetime gift **in the app**
 (`setPremiumLifetime`) clears `premium_until` but leaves
@@ -729,10 +621,7 @@ How it holds together:
 - **The script.** `ops-panel.js` is served by `edge` at `/ops-panel.js`. `overlay.sh`
   puts it in `index.html` ahead of the app's bundle, because it has to see the app's
   first api calls to pick up the session. `overlay.sh` is the only writer of
-  `custom.compose.yml` and of the route in `caddy.d/`: it composes the badge patch and
-  the panel, so either can be turned off without the other. `premium.sh` finds out
-  whether the badge is applied from `ops/patches/patched.names`, not from the compose
-  file.
+  `custom.compose.yml` and of the route in `caddy.d/`.
 - **The route.** `ops/panel/route.caddy` holds the `/ops-api/*` and `/ops-panel.js`
   routes; `overlay.sh` copies it to `caddy.d/fluxer-ops-panel.caddy`, which upstream's
   Caddyfile imports into its site block (Caddy orders `handle` blocks by path, so they
@@ -744,14 +633,13 @@ How it holds together:
   back off and the bridge stopped. Either way a bad route cannot take the site down.
   `fluxer panel off` stops the bridge first, so the kill switch works even
   if the Caddy step then fails.
-- **Updates and rollback.** `update.sh` takes both off before an update and puts them
-  back after. `fluxer rollback` does the same: overlay off, roll back, badge and panel
-  back on. `doctor` flags a route missing from `caddy.d/`. After a `git pull` that
+- **Updates and rollback.** `update.sh` takes the panel off before an update and puts
+  it back after. `fluxer rollback` does the same: overlay off, roll back, panel back on. `doctor` flags a route missing from `caddy.d/`. After a `git pull` that
   changes `ops-panel.js` or `ops_bridge.py`, run `fluxer panel refresh`: the served
   script is a copy, and the bridge has to restart to run the new code.
 
 **Web app only.** The desktop and mobile apps never load this server's `index.html`
-(see *Known gaps*), so the panel, like the badge, is not there.
+(see *Known gaps*), so the panel is not there.
 
 ## Debugging: `errors`, `top`, `voice`, shells
 
@@ -828,7 +716,7 @@ fluxer restore /tmp/r/backup
 - **The firewalld fix is written but not applied** (`fluxer firewall-fix --apply`).
 - The **uploads** half of a restore has never been run end to end.
 - **Client-side changes reach the web app only.** Anything this repository puts into
-  the client (the Visionary badge and the STAFF Ops panel) is served through this
+  the client (the STAFF Ops panel) is served through this
   instance's `index.html`, which only the browser loads. The desktop app renders from its own
   signed `fluxer_renderer` module (from `pkgs.fluxer.com`), or from a renderer bundled
   in the app when an instance turns modules off, so it never runs code from this

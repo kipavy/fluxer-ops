@@ -42,7 +42,6 @@ assert_contains "may use docker" "SupplementaryGroups=docker" "$unit"
 assert_contains "can never sudo" "NoNewPrivileges=yes" "$unit"
 assert_contains "isolated python, socket in ops/panel/run" \
 	"ExecStart=/usr/bin/python3 -I $tmp/inst/ops/ops_bridge.py --socket $tmp/inst/ops/panel/run/bridge.sock" "$unit"
-assert_contains "the bridge never reaches badge-patch.sh" "Environment=PREMIUM_SKIP_BADGE_PATCH=1" "$unit"
 assert_contains "knows the instance" "Environment=FLUXER_DIR=$tmp/inst" "$unit"
 assert_contains "knows the domain (no .env under rexctl)" "Environment=FLUXER_DOMAIN=example.test" "$unit"
 assert_contains "knows the project (compose by name)" "Environment=FLUXER_PROJECT=fluxer" "$unit"
