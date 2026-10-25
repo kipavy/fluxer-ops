@@ -106,8 +106,22 @@ until_ok() {
 		sleep 1
 	done
 }
-route_live() { [ "$(origin_get /ops-api/health)" = 200 ]; }
-script_live() { [ "$(origin_get /ops-panel.js)" = 200 ]; }
+# A 200 alone proves nothing: the app's catch-all answers every unknown path with its
+# html. The bridge's own answer, and the script's own bytes, prove the route.
+route_live() {
+	f=$(mktemp)
+	rc=1
+	[ "$(origin_get /ops-api/health "$f")" = 200 ] && grep -q '"ok": *true' "$f" && rc=0
+	rm -f "$f"
+	return "$rc"
+}
+script_live() {
+	f=$(mktemp)
+	rc=1
+	[ "$(origin_get /ops-panel.js "$f")" = 200 ] && ! grep -qi '<!doctype html' "$f" && rc=0
+	rm -f "$f"
+	return "$rc"
+}
 html_loads_panel() {
 	f=$(mktemp)
 	origin_get / "$f" > /dev/null

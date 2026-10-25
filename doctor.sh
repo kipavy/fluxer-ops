@@ -385,6 +385,13 @@ check_panel() {
 	else
 		fail "the Ops panel is on but its route is not in $FLUXER_DIR/caddy.d/" "fluxer panel refresh"
 	fi
+	# Through edge on this host: the bridge's JSON, not the app's catch-all html.
+	d=$(fx_domain)
+	if curl -s --max-time 10 --resolve "$d:443:127.0.0.1" "https://$d/ops-api/health" 2> /dev/null | grep -q '"ok": *true'; then
+		ok "Ops panel route answers through edge"
+	else
+		fail "edge does not route /ops-api/ to the bridge (the app answers instead)" "fluxer panel refresh; if it persists: fluxer update (an old release's Caddyfile does not import caddy.d/)"
+	fi
 }
 
 # --- rexctl ---------------------------------------------------------------------
