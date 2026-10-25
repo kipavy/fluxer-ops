@@ -37,7 +37,8 @@ fi
 
 # 1. rexctl itself. The installer, run with a command, installs rexctl into
 #    ~/.local/bin (checksum-verified against fluxer.dev's release info), then runs it.
-if ! fx_rexctl_bin > /dev/null; then
+# Where cron and the bridge will look: REXCTL set by hand does not count.
+if ! REXCTL='' fx_rexctl_bin > /dev/null; then
 	echo "Installing rexctl (upstream's installer, $INSTALLER_URL)."
 	tmp=$(mktemp -d)
 	trap 'rm -rf "$tmp"' EXIT
@@ -46,7 +47,7 @@ if ! fx_rexctl_bin > /dev/null; then
 	(cd "$tmp" && sha256sum -c install.sh.sha256 > /dev/null 2>&1) \
 		|| { echo "The installer's checksum did not verify. It was not run; nothing changed." >&2; exit 1; }
 	sh "$tmp/install.sh" version < /dev/null
-	fx_rexctl_bin > /dev/null || { echo "rexctl did not install; nothing changed." >&2; exit 1; }
+	REXCTL='' fx_rexctl_bin > /dev/null || { echo "rexctl did not install; nothing changed." >&2; exit 1; }
 fi
 echo "Using $(fx_rexctl_bin) ($("$(fx_rexctl_bin)" version 2> /dev/null | head -n 1))."
 
