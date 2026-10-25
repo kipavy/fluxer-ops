@@ -22,9 +22,10 @@ It checks everything before it changes anything, and asks before each change:
 1. **Prerequisites**: installs Docker if it is missing, gives you access to it.
 2. **Your instance**: uses the Fluxer already on the server, or installs one: it checks
    your domain points here, tells you which ports to open at your provider, then runs
-   Fluxer's official installer (checksum-verified: the `.sha256` comes from the same
-   place over the same TLS connection, so this catches a corrupted download, not a
-   swapped one - it is not a signature).
+   Fluxer's official installer, which installs upstream's `rexctl` and runs
+   `rexctl install` (checksum-verified: the `.sha256` comes from the same place over the
+   same TLS connection, so this catches a corrupted download, not a swapped one - it is
+   not a signature).
 3. **Wiring**: the `fluxer` command, nightly backups, the watchdog.
 4. **Optional**: alerts to your phone or chat, encrypted off-site backups, fixes for
    firewalld and Cloudflare, each offered only when it applies.
@@ -58,11 +59,46 @@ checkout at `<instance>/ops`; `setup.sh` says so if it is not.
 
 ## This deployment
 
-Upstream ships `install.sh`, which handles **installs, updates and rollback**, and
-takes a backup **only during an upgrade**. There is no upstream CLI for monitoring or
-for scheduled backups. These scripts fill that gap. They started on an Oracle Cloud
+Upstream ships **`rexctl`** (since 2026-10-25; it replaced `install.sh`), which
+handles **installs, upgrades, rollback, settings, start/stop**, accounts and its own
+backups. It does not watch the instance, schedule or off-site backups, alert anyone,
+or know about anything this repository adds (premium, gifts, the badge patch, the Ops
+panel, the changelog channel). These scripts fill that gap, **on top of rexctl**: they
+go through its public commands only (`rexctl config`, `upgrade --check --json`,
+`start`, `rollback`...) and its two extension points, `custom.compose.yml` and
+`caddy.d/`, and never edit the files rexctl renders. They started on an Oracle Cloud
 host with firewalld, which is where several of them (watchdog, firewall-fix) come
 from.
+
+### Working with rexctl
+
+Once rexctl manages an instance (`.rexctl/state.json` exists), there is no `.env`
+any more: settings and secrets live in `.rexctl/state.json`, and the rendered
+`docker-compose.yml` refuses a plain `docker compose up`. So the scripts reach the
+instance through `lib.sh` only:
+
+| `lib.sh` | Does |
+| --- | --- |
+| `fx_env KEY` / `fx_env_set K=V...` | `rexctl config get --reveal` / `config set`. Old variable names keep working: when rexctl says `FLUXER_DOMAIN is set through domain`, the new name is followed. |
+| `compose ...` | `docker compose -p <project>` from `/`: `ps`, `exec`, `logs`, `restart` need only the project name. |
+| `fx_apply` | `rexctl start`: recreates what changed, restarts edge when `caddy.d/` changed. |
+| `rexctl ...` | rexctl on this instance, always as the instance's owner (also from root's cron). |
+
+**Which one to type.** `fluxer`, by default: it calls rexctl itself and adds what
+rexctl cannot know about. In particular, **update and roll back with `fluxer update` /
+`fluxer rollback`, never `rexctl upgrade` / `rexctl rollback` directly**: the badge
+patch and the Ops panel mount an `index.html` naming the running release's chunks, so
+they must come off before the release changes and back on after, which only `fluxer`
+does. Use `rexctl` (or `fluxer rexctl ...`) for what `fluxer` has no command for:
+`admins`, `invites`, `registration`, `email`, `branding`, `config list`.
+
+An instance the old installer made keeps running but cannot update any more:
+**`fluxer migrate`** hands it over (backup first, then `rexctl takeover`; Fluxer keeps
+running, `.env` moves into `.rexctl/state.json`, `docker-compose.override.yml` becomes
+`custom.compose.yml`), then rebuilds the overlay. Until then every script falls back
+to `.env` and `docker compose`, so cron keeps working. `rexctl eject` hands an
+instance back to plain docker compose. Upstream's own commands: `rexctl --help`, or
+`fluxer rexctl ...` to run it on this instance.
 
 ## The `fluxer` command
 
@@ -72,7 +108,7 @@ it works from any directory. `fluxer help` is the full list; the shape of it:
 ```
 Health    status [--json]  check  doctor  errors  top  voice
 Stack     logs  up  down  ps  restart  psql  valkey  sh <svc>
-Updates   changelog  update  rollback  prune
+Updates   changelog  update  rollback  autoupdate  prune  migrate  rexctl
 Accounts  users  premium  gifts  badge-patch
 Backups   backup  backups  verify-backup  restore  offsite
 Host      notify  disk  env  cf-ips  firewall-fix  setup  panel
@@ -102,32 +138,33 @@ Three commands are worth knowing before you need them:
 | --- | --- | --- |
 | `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, container health, and that every script the app shell names resolves. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, brings the stack up if services are missing, and runs `premium.sh --repair`. |
-| `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + `.env` + configs + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. |
-| `update.sh` | you, when updating; `autoupdate.sh` | iptables preflight, refreshes and verifies `install.sh`, shows the plan, asks, applies, then verifies. |
-| `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when the registry or the stack files have something new; posts the changelog to a channel, pauses itself after a failure. |
+| `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + settings (`.rexctl/state.json`, or `.env` before rexctl) + `custom.compose.yml`, `caddy.d/` + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. Hot: no downtime, unlike `rexctl backup`. |
+| `update.sh` | you, when updating; `autoupdate.sh` | Around `rexctl upgrade`: iptables preflight, the plan, asks, overlay off, upgrade, `check.sh`, overlay back on. `--to V` for a given release. |
+| `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when `rexctl upgrade --check` reports a newer release; posts the changelog to a channel, pauses itself after a failure. |
 | `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length -- and applies the Visionary badge patch for lifetime. One command, start to finish. |
 | `badge-patch.sh` | `update.sh`, `premium.sh`, and you | Patches the web bundle so the Visionary badge renders on a self-hosted instance. `--revert` undoes it. |
-| `overlay.sh` | `badge-patch.sh`, `panel.sh`, `update.sh` | The one writer of `docker-compose.override.yml` and the served `index.html`: composes the badge patch and the Ops panel. `suspend` drops it for an update. |
-| `panel.sh` | you, `update.sh` (`refresh`) | The in-app STAFF Ops panel: bridge unit, Caddy route, script. `off` is the kill switch. |
+| `overlay.sh` | `badge-patch.sh`, `panel.sh`, `update.sh` | The one writer of `custom.compose.yml`, the panel route in `caddy.d/` and the served `index.html`: composes the badge patch and the Ops panel, applied with `rexctl start`. `suspend` drops it for an update. |
+| `panel.sh` | you, `update.sh` (`refresh`) | The in-app STAFF Ops panel: bridge unit, Caddy route (`caddy.d/fluxer-ops-panel.caddy`), script. `off` is the kill switch. |
 | `ops_bridge.py` | systemd (`fluxer-ops-bridge`) | Runs allowlisted commands for the Ops panel after checking the session and STAFF. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
 | `offsite.sh` | `backup.sh`, and you | restic (from its Docker image) to Cloudflare R2: push, snapshots, check, restore into a local dir. A no-op until configured. |
-| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, the client overlay (override file and its mounts) and the Ops panel (bridge, route, Caddyfile copy), rollback images. |
+| `doctor.sh` | you | Read-only drift checks: cron, backups, off-site, alerts, certs, Cloudflare ranges, badge patch, the client overlay (compose file and its mounts) and the Ops panel (bridge, route), `rexctl doctor`, rollback images. |
 | `firewall-fix.sh` | you, once | Diagnoses Docker vs firewalld on this host; `--apply` installs the systemd drop-in that fixes it. |
-| `cf-ips.sh` | you, `doctor.sh` | Compares `FLUXER_EDGE_TRUSTED_PROXIES` with Cloudflare's published ranges; `--apply` rewrites that line. |
+| `cf-ips.sh` | you, `doctor.sh` | Compares the trusted proxies (`edge.trusted_proxies`) with Cloudflare's published ranges; `--apply` sets them (`rexctl config set`). |
 | `users.sh` | you | List and inspect accounts, set STAFF, mark an email verified, instance counts. |
 | `gifts.sh` | you | Plutonium gift codes and links, lifetime included. |
 | `debug.sh` | you | psql / valkey-cli / shell shortcuts, grouped error scan, per-service memory, voice reachability. |
-| `prune.sh` | you | Frees image space while keeping every image a container, the compose file or the newest 2 installer records needs. Lists by default. |
+| `prune.sh` | you | Frees image space while keeping every image a container, the current release or any release `rexctl rollback` can go back to needs. Lists by default. |
 | `disk.sh` | you; user cron `--record` daily | Filesystem, volumes, backups, images; keeps `../fluxer-backups/disk-history.tsv` for growth and days-until-full. |
-| `env.sh` | you | `keys`/`get`/`set`/`diff` on `.env`; secrets masked, backup before every change. |
-| `changelog.sh` | you, before updating; `autoupdate.sh` (`--summary`) | Per-component running version vs what `v1` points at now, and the commits in between. `--summary`: the same as chat markdown, commits grouped by `changelog_fmt.py`. |
+| `env.sh` | you | `list`/`get`/`set`/`unset` settings through `rexctl config` (secrets masked); on `.env` before the takeover. |
+| `changelog.sh` | you, before updating; `autoupdate.sh` (`--summary`) | Per-component running revision vs the release `rexctl upgrade` would install (its `fluxer-release@<v>` tag), and the commits in between. `--summary`: the same as chat markdown, commits grouped by `changelog_fmt.py`. |
 | `changelog_fmt.py` | `changelog.sh --summary` | Conventional Commit subjects into heads-up / new / fixes; CI, i18n, tests, docs and desktop-only commits counted, not listed. |
 | `webhook_post.py` | `autoupdate.sh` | Posts to a Fluxer/Discord webhook; splits only past the size limit (4000 for a Fluxer webhook). |
-| `registry.py` | `changelog.sh`, `autoupdate.sh` | Anonymous registry client: what a tag points at (digest, version, revision), and a repository's tags. |
-| `setup.sh` | you, or `get.sh` | Prerequisites, the instance (installing it if needed), the `fluxer` symlink, completion, cron jobs, optional extras. Idempotent; `--check` only reports. |
+| `registry.py` | nothing since rexctl (kept for hand use) | Anonymous registry client: what a tag points at (digest, version, revision), and a repository's tags. |
+| `setup.sh` | you, or `get.sh` | Prerequisites, the instance (`rexctl install` if needed), the `fluxer` symlink, completion, cron jobs, optional extras. Idempotent; `--check` only reports. |
+| `migrate.sh` | you, once (`fluxer migrate`) | Hands an old-installer instance to rexctl: installs it, `takeover --dry-run`, backup, `takeover`, overlay rebuilt, `check.sh`. |
 | `get.sh` | `curl \| sh` | Clones this repository next to the instance and runs `setup.sh`. |
-| `lib.sh` | every script | Finds the instance (`FLUXER_DIR`) and backups (`BACKUP_ROOT`); nothing is hardcoded. |
+| `lib.sh` | every script | Finds the instance (`FLUXER_DIR`) and backups (`BACKUP_ROOT`), and is the one way to reach it (see *Working with rexctl*); nothing is hardcoded. |
 | `install-host.sh` | old habits | Same as `setup.sh --no-extras`. |
 | `selftest.sh` | you, after editing these | Checks the tooling itself. Touches nothing. |
 
@@ -233,8 +270,9 @@ lives per runner (`/var/lib/fluxer-notify` for the root watchdog,
 `~/.local/state/fluxer-notify` for the rest), so root and the user never fight over
 a file; `status` reads both.
 
-Email reuses the SMTP settings in `.env` -- which today has **no SMTP host**, so
-email alerts need one set first. `notify.conf` holds webhook URLs and tokens, which
+Email reuses the instance's SMTP settings (`FLUXER_EMAIL_SMTP_*`, read through
+`rexctl config`) unless `NOTIFY_SMTP_*` in `notify.conf` override them -- and the
+instance has **no SMTP host** today, so email alerts need one set first. `notify.conf` holds webhook URLs and tokens, which
 are credentials, so it is gitignored. Configure two channels if you can, and do not
 make a webhook into *this* instance the only one: it goes down with the thing it is
 meant to report.
@@ -263,34 +301,34 @@ fluxer changelog     # what it would bring
 fluxer update        # preflight, plan, ask, apply, verify
 ```
 
-Upstream publishes no release notes: each component is tagged separately
-(`fluxer-api@2026.913.183320`) and a release body is only a compare link.
-`fluxer changelog` works from what does exist -- the commit each running image was
-built from (its `org.opencontainers.image.revision` label) and what `v1` points at
-in the registry now -- and prints, per component, running vs available and the
-commit subjects in between, plus any third-party image the refreshed
-`docker-compose.yml` would change. It uses a throwaway blobless clone rather than the
-GitHub API, which allows 60 unauthenticated requests an hour.
+`fluxer update` wraps `rexctl upgrade`, which updates rexctl itself first, backs up,
+pulls the new release's pinned images, migrates and recreates, and keeps what
+`rexctl rollback` needs. Around it `fluxer update` runs the iptables preflight, takes
+the client overlay (badge patch, Ops panel) off and puts it back on the new release,
+and runs `check.sh`. `--check` shows the plan only; `--to <version>` picks a release.
 
-`install.sh --update` refreshes only five stack files (`docker-compose.yml`,
-`docker-compose.proxy.yml`, `tunnel.compose.yml`, `Caddyfile`, `.env.example`).
-It **never updates itself**, so `update.sh` re-downloads and checksum-verifies it
-first. Roll back with:
+Upstream publishes no release notes. A release is one git tag,
+`fluxer-release@<version>`, naming the commit every image of it was built from.
+`fluxer changelog` compares that with what runs here -- the commit each running image
+was built from (its `org.opencontainers.image.revision` label) -- and prints, per
+component, running vs the release `rexctl upgrade` would install and the commit
+subjects in between, plus any third-party image that release's compose file changes.
+It uses a throwaway blobless clone rather than the GitHub API, which allows 60
+unauthenticated requests an hour.
 
-```sh
-sh install.sh --rollback --dir /path/to/fluxer   # on this deployment, /home/ubuntu/Documents/fluxer
-```
+Roll back with `fluxer rollback` (overlay off, `rexctl rollback`, overlay back on;
+extra arguments go to rexctl, e.g. `--restore-database`).
 
-Rollback needs the previous images still on disk, and on the moving `v1` tag those
-images are **untagged** after an update. Docker calls that dangling, so **even a
-plain `docker image prune`** -- not just `-a` -- deletes exactly what rollback needs
-(right after the last update: 13 images, 3.5 GB, all of which `docker system df`
-calls "reclaimable"). Use `fluxer prune`: it keeps every image a container (running
-or stopped), the compose file, or the newest two installer records refers to, lists
-by default, and removes by ID without `-f` only after you confirm. Other projects'
-images on this host are listed and never touched.
+Rollback needs the previous release's images. rexctl lists them in
+`.rexctl/releases/<version>/images.json` and pins them by digest, so a pruned one can
+be pulled again while the registry keeps it -- but a plain `docker image prune` still
+removes them from disk. Use `fluxer prune`: it keeps every image a container (running
+or stopped), the current release or any release rexctl keeps for rollback refers to,
+lists by default, and removes by ID without `-f` only after you confirm. Other
+projects' images on this host are listed and never touched.
 
-Database schema migrations are not reverted by a rollback.
+Database schema migrations are not reverted by a rollback unless you ask rexctl to
+restore the pre-upgrade database (`fluxer rollback --restore-database`).
 
 ### Automatic updates: `fluxer autoupdate`
 
@@ -303,17 +341,16 @@ fluxer autoupdate off
 ```
 
 Off by default, and `on` says plainly what it costs before asking: an update
-stops the stack for a few minutes (the installer's cold backup, then the
-recreate), what gets applied is not reviewed first (there are no release notes),
-and nothing rolls back on its own.
+stops the stack for a few minutes (rexctl's backup, then the recreate), what gets
+applied is not reviewed first (there are no release notes), and nothing rolls back
+on its own.
 
-**Only when there is something new.** Every run first compares the registry digest
-of each `fluxer-*` image's tag with the digests the running containers were pulled
-as, and reads `install.sh --update --dry-run`'s list of stack files. Nothing new --
-most nights -- means no update and so no downtime. A change to `.env.example`
-alone (a new optional setting) does not trigger one; it rides along with the next.
-When the registry cannot be asked, or the dry run's output cannot be read, the run
-does nothing and alerts: "cannot tell" is never taken for "nothing new".
+**Only when there is something new.** Every run first asks `rexctl upgrade --check
+--json` whether a newer release exists. Nothing new -- most nights -- means no update
+and so no downtime. When the check cannot run, its answer cannot be read, or rexctl
+reports the new release blocked (one in between is needed first), the run does
+nothing and alerts: "cannot tell" is never taken for "nothing new", and a blocked
+upgrade is never forced.
 
 **The schedule.** The host clock is UTC, so cron fires every hour at the chosen
 minute and the run carries on only when the hour in `--tz` matches: summer and
@@ -323,9 +360,9 @@ lock keeps two runs from overlapping.
 
 **What you hear.** With `AUTOUPDATE_WEBHOOK_URL` set in `notify.conf` (a Fluxer or
 Discord channel webhook), each applied update is one short message there, in
-French: the version before and after, what triggered it, *En bref* (below) --
+French: the version before and after, the release, *En bref* (below) --
 or, without it, the *À noter* section -- and "Changelog détaillé", a link to the
-upstream compare from the oldest running revision to the newest one.
+upstream compare from the oldest running revision to the release.
 
 Both come from `fluxer changelog --summary`, taken just before the update: each
 component's old and new version, and the commits grouped by `changelog_fmt.py`
@@ -351,11 +388,6 @@ channels (key `autoupdate`), as does a check that could not run.
 **After a failure** automatic updates **pause**: retrying every night on a broken
 stack helps nobody. `fluxer autoupdate status` says so; look with `fluxer check`,
 roll back with `fluxer rollback` if needed, and `fluxer autoupdate on` resumes.
-
-**Major tags are not followed.** The instance follows `FLUXER_IMAGE_TAG` (`v1`,
-which moves). When a `v2` tag appears it is announced in the channel once, and
-switching stays a human decision (`fluxer env set FLUXER_IMAGE_TAG v2`, then
-`fluxer update`).
 
 `update.sh` needs sudo (the iptables preflight), so `on` refuses on an account
 without passwordless sudo: cron cannot type a password. State and log live in
@@ -415,8 +447,8 @@ it also drives the setup flow, registration and the Stripe paths. So
    way, and `index.html` loads that copy instead. Patching the chunk alone serves the
    patched file but runs the stock one -- the badge stays unchanged. A loader that
    `index.html` does not load itself is refused rather than guessed at.
-4. Bind-mounts those files through `docker-compose.override.yml` (auto-loaded,
-   because `.env` sets no `COMPOSE_FILE`), then proves app-proxy serves the patched
+4. Bind-mounts those files through `custom.compose.yml` (rexctl loads it after its
+   own files; `overlay.sh` writes it), then proves app-proxy serves the patched
    bytes in all three encodings and that both the origin and public HTML reference
    the new chunk.
 
@@ -446,21 +478,21 @@ manifest, so the service worker caches a file nothing loads.
 ### Keeping it applied
 
 The mounted `index.html` names a release-specific chunk, so it must **not** stay
-mounted while the app image changes underneath it. `install.sh --update` finishes
-with `compose pull` and `compose up -d`, and the override joins every compose
-command, so the new image would be served an `index.html` pointing at chunks it
-does not have -- the page answers 200 and the app loads nothing. So:
+mounted while the app image changes underneath it. `rexctl upgrade` recreates the
+stack with `custom.compose.yml` still loaded, so the new image would be served an
+`index.html` pointing at chunks it does not have -- the page answers 200 and the app
+loads nothing. So:
 
 - **`fluxer update`** reverts the patch before applying, re-applies after the
   health checks pass, and if the update itself fails leaves the patch off and says
   so. Off is a working app without the Visionary extras (the Plutonium badge itself
   needs no patch).
-- **`fluxer rollback`** does the same around `install.sh --rollback`, for the mirror
+- **`fluxer rollback`** does the same around `rexctl rollback`, for the mirror
   image of the problem: a patch built from the newer release names chunks the older
   one never had.
 - **`fluxer check`** verifies every `<script src>` in the served shell resolves, so
   this breakage is caught however it arises -- including someone running
-  `install.sh` directly, around the patch. That check is the reason it is in
+  `rexctl upgrade` directly, around the patch. That check is the reason it is in
   `check.sh` and not only in `update.sh`: the watchdog runs `check.sh` every ten
   minutes, so a broken shell surfaces on its own rather than waiting to be noticed.
 
@@ -696,21 +728,25 @@ How it holds together:
   the panel, including to give STAFF to someone else, and that is the trace it leaves.
 - **The script.** `ops-panel.js` is served by `edge` at `/ops-panel.js`. `overlay.sh`
   puts it in `index.html` ahead of the app's bundle, because it has to see the app's
-  first api calls to pick up the session. `overlay.sh` is now the only writer of
-  `docker-compose.override.yml`: it composes the badge patch and the panel, so either
-  can be turned off without the other. `premium.sh` finds out whether the badge is
-  applied from `ops/patches/patched.names`, not from the compose file.
-- **Going live safely.** `fluxer panel on` checks the new Caddyfile with edge's own
-  Caddy (`caddy adapt`) before it replaces the running one, retries the reload and,
-  if it still fails, undoes itself: on a refresh the previous
-  Caddyfile copy is put back (the panel stays on); on a first `on` the panel is switched
+  first api calls to pick up the session. `overlay.sh` is the only writer of
+  `custom.compose.yml` and of the route in `caddy.d/`: it composes the badge patch and
+  the panel, so either can be turned off without the other. `premium.sh` finds out
+  whether the badge is applied from `ops/patches/patched.names`, not from the compose
+  file.
+- **The route.** `ops/panel/route.caddy` holds the `/ops-api/*` and `/ops-panel.js`
+  routes; `overlay.sh` copies it to `caddy.d/fluxer-ops-panel.caddy`, which upstream's
+  Caddyfile imports into its site block (Caddy orders `handle` blocks by path, so they
+  win over the catch-all). Upstream's Caddyfile is never copied or edited, so an
+  upstream change to it needs nothing from us; `rexctl start` restarts edge when
+  `caddy.d/` changes.
+- **Going live safely.** `fluxer panel on` checks the route with edge's own Caddy
+  (`caddy adapt`) before it is placed; if applying it then fails the panel is switched
   back off and the bridge stopped. Either way a bad route cannot take the site down.
   `fluxer panel off` stops the bridge first, so the kill switch works even
   if the Caddy step then fails.
 - **Updates and rollback.** `update.sh` takes both off before an update and puts them
-  back after (`fluxer panel refresh` rebuilds the Caddyfile copy from upstream's new
-  one). `fluxer rollback` does the same: overlay off, roll back, badge and panel back
-  on. `doctor` flags a copy that has drifted from upstream's. After a `git pull` that
+  back after. `fluxer rollback` does the same: overlay off, roll back, badge and panel
+  back on. `doctor` flags a route missing from `caddy.d/`. After a `git pull` that
   changes `ops-panel.js` or `ops_bridge.py`, run `fluxer panel refresh`: the served
   script is a copy, and the bridge has to restart to run the new code.
 
@@ -749,25 +785,31 @@ another network, `nc -vz <ip> 7881` proves TCP.
 > been restored end to end, and `fluxer restore` itself has not been run in anger.
 
 ```sh
-cd /path/to/fluxer   # on this deployment, /home/ubuntu/Documents/fluxer
-d=../fluxer-backups/auto-<timestamp>
-
-# database
-docker compose up -d postgres
-docker compose exec -T postgres psql -U fluxer -d postgres \
-  -c 'DROP DATABASE fluxer;' -c 'CREATE DATABASE fluxer OWNER fluxer;'
-docker compose exec -T postgres pg_restore -U fluxer -d fluxer < "$d/fluxer.dump"
-
-# uploads
-docker compose down
-docker run --rm -v fluxer_seaweedfs-data:/data -v "$PWD/$d:/backup" alpine:3.22 \
-  sh -c 'rm -rf /data/* && tar xzf /backup/seaweedfs-data.tgz -C /data'
-docker compose up -d
-./ops/check.sh
+fluxer restore auto-<timestamp>   # asks first; database, then uploads, then check
 ```
 
-`.env` is required for a restore: it holds the secrets that open the database and
-the object store. It is included in every backup.
+By hand, what it does (the project is `fluxer` on this deployment):
+
+```sh
+d=~/Documents/fluxer-backups/auto-<timestamp>
+
+# database
+docker compose -p fluxer exec -T postgres psql -U fluxer -d postgres \
+  -c 'DROP DATABASE fluxer;' -c 'CREATE DATABASE fluxer OWNER fluxer;'
+docker compose -p fluxer exec -T postgres pg_restore -U fluxer -d fluxer < "$d/fluxer.dump"
+
+# uploads
+rexctl stop
+docker run --rm -v fluxer_seaweedfs-data:/data -v "$d:/backup" alpine:3.22 \
+  sh -c 'rm -rf /data/* && tar xzf /backup/seaweedfs-data.tgz -C /data'
+rexctl start
+fluxer check
+```
+
+The settings are required for a restore onto a new host: they hold the secrets that
+open the database and the object store. Every backup has them
+(`rexctl/state.json`; `.env` in backups from before the takeover). For a whole new
+machine, `rexctl backup` + `rexctl restore <file>` is the other route.
 
 From off-site, restore into a local directory first -- `offsite.sh` never writes to
 a live volume -- then apply it the same way:
@@ -821,7 +863,7 @@ fluxer offsite snapshots
 What goes up is **not** the backup directory as-is. `seaweedfs-data.tgz` is a gzip
 stream, which differs from its first changed byte onward, so a 99%-identical tarball
 uploads 100% new every night and defeats dedup. Instead restic reads the uploads
-**volume** directly (read-only), next to the dump, `.env`, configs and `ops/`.
+**volume** directly (read-only), next to the dump, the settings, configs and `ops/`.
 SeaweedFS blobs live in append-only `.dat` files, so a night uploads roughly the new
 tail (a volume vacuum rewrites them; expect one large push then). `offsite.conf`
 itself is excluded: the key to the repo is no use inside it.
@@ -857,7 +899,7 @@ Known limit: the R2 token on this host can also delete the repository, so a
 compromised host can take the off-site copies with it. Closing that needs
 append-only storage (R2 bucket lock rules).
 
-## Disk, `.env`, and Cloudflare ranges
+## Disk, settings, and Cloudflare ranges
 
 **`fluxer disk`** breaks usage down (filesystem, each volume, scheduled vs
 installer backups, images) and, from the daily `--record` line cron writes to
@@ -865,23 +907,20 @@ installer backups, images) and, from the daily `--record` line cron writes to
 "full in N days". Sizes come from `docker system df -v`, so a cron run starts no
 helper containers.
 
-**`fluxer env`** exists so a one-line change does not mean putting every secret on
-screen, or writing a line compose reads differently than it looks (`a #b` is `a`;
-`$x` expands). `get` masks secret-looking keys unless `--reveal`; `set` backs up
-`.env` to `.env.bak-<ts>` (mode 600), rewrites that single line atomically, quotes
-only what compose would misread, and prints which services use the variable and the
-exact `docker compose up -d` to run -- it never recreates anything itself. It
-refuses `POSTGRES_PASSWORD` (postgres reads it only when the volume is created, so a
-new value locks the stack out) and duplicate keys (`install.sh` reads the first,
-compose the last). `diff` shows keys new in `.env.example`, never values.
+**`fluxer env`** is `rexctl config` under the old verbs: `list` (every setting, raw
+ones too), `get KEY [--reveal]` (secrets masked unless asked), `set KEY VALUE` (`-`
+reads the value from stdin, out of shell history; rexctl validates it and recreates
+what reads it), `unset KEY`. Before the takeover it edits `.env` as it used to
+(backup, one line rewritten atomically, the `docker compose up -d` to run printed).
 
 **`fluxer cf-ips`**: Caddy trusts only the ranges in `FLUXER_EDGE_TRUSTED_PROXIES`
 (see *Notes on this instance*). A Cloudflare range missing from it makes every
 visitor through it look like Cloudflare, so rate limits and bans hit a whole PoP.
 It fetches `ips-v4`/`ips-v6`, validates every line and the count (otherwise changes
 nothing, exit 2), and prints what was added and removed (exit 0 in sync, 1 drift).
-`--apply` backs up `.env`, swaps just that line keeping `private_ranges` and private
-CIDRs, and offers `docker compose up -d edge`, since Caddy reads it only at creation.
+`--apply` sets the new list (keeping `private_ranges` and private CIDRs) with
+`rexctl config set edge.trusted_proxies`, which recreates edge: a few seconds of TLS
+downtime.
 Note it treats any public range that is not Cloudflare's as retired, so a
 hand-added public proxy would be dropped.
 
@@ -889,8 +928,9 @@ hand-added public proxy would be dropped.
 
 Public access is Cloudflare's **DNS proxy** (orange cloud), not a `cloudflared`
 tunnel — there is no tunnel daemon anywhere on the host. Caddy (the `edge`
-service) terminates TLS on the origin. Because of this, `FLUXER_EDGE_TRUSTED_PROXIES`
-in `.env` must list Cloudflare's ranges: the shipped `Caddyfile` sets
+service) terminates TLS on the origin. Because of this, the trusted proxies
+(`edge.trusted_proxies` in rexctl, `FLUXER_EDGE_TRUSTED_PROXIES` underneath) must list
+Cloudflare's ranges: the shipped `Caddyfile` sets
 `trusted_proxies_strict` and defaults to `private_ranges` only, so without them
 every client IP resolves to Cloudflare's edge and rate limits and bans key off the
 wrong address. `fluxer cf-ips` checks the list against Cloudflare's (`doctor` runs

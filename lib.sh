@@ -150,9 +150,25 @@ compose() {
 	fi
 }
 
+# rexctl names some settings itself (domain, edge.trusted_proxies...) and refuses the
+# old variable name with "FLUXER_X is set through <name>.": follow that, so callers
+# keep using the variable names and a later rename upstream is followed too.
+fx_key() {
+	_err=$(rexctl -q config get "$1" 2>&1 > /dev/null) || true
+	case "$_err" in
+		*" is set through "*) printf '%s\n' "$_err" | sed -n 's/.* is set through \([^ ]*\)\.$/\1/p' | head -n 1 ;;
+		*) printf '%s\n' "$1" ;;
+	esac
+}
+
 fx_env() {
 	if fx_managed; then
-		rexctl -q config get "$1" --reveal 2> /dev/null | tr -d '\r'
+		_v=$(rexctl -q config get "$1" --reveal 2> /dev/null | tr -d '\r') || _v=''
+		if [ -z "$_v" ]; then
+			_k=$(fx_key "$1")
+			[ "$_k" = "$1" ] || _v=$(rexctl -q config get "$_k" --reveal 2> /dev/null | tr -d '\r') || _v=''
+		fi
+		printf '%s\n' "$_v" | sed '/^$/d'
 	else
 		sed -n "s/^$1=//p" "$FLUXER_DIR/.env" 2> /dev/null | head -n 1 | tr -d '\r"' | sed "s/'//g"
 	fi
@@ -170,6 +186,12 @@ fx_domain() {
 
 fx_env_set() {
 	if fx_managed; then
+		_args=''
+		for _kv in "$@"; do
+			_k=$(fx_key "${_kv%%=*}")
+			_args="$_args $(printf '%s=%s' "$_k" "${_kv#*=}" | sed "s/'/'\\\\''/g; s/^/'/; s/\$/'/")"
+		done
+		eval "set -- $_args"
 		rexctl config set "$@"
 	else
 		for _kv in "$@"; do
