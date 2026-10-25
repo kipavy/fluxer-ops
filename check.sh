@@ -70,7 +70,7 @@ fi
 
 # 4. Every script the app shell names must actually resolve. `/` answering 200 is
 #    not enough: index.html is a template naming content-hashed chunks, so a stale
-#    bundle patch (ops/badge-patch.sh) or an update applied around it can leave the
+#    overlay (ops/overlay.sh) or an update applied around it can leave the
 #    page pointing at chunks the image no longer has. The page still returns 200
 #    while the app never boots, and nothing else here would notice.
 scripts=$(curl -sS --max-time 20 "$base/" 2>/dev/null \

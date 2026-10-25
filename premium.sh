@@ -19,9 +19,8 @@
 #   2. The instance has to report premium_enabled, i.e. the admin panel's premium
 #      mode is 'mirror'. In 'everyone' mode the client hides premium altogether
 #      (shouldShowPremiumFeatures). This script warns when that is the case.
-#   3. For lifetime only: the stock client shows the Plutonium badge but hides the
-#      "Visionary since" tooltip and the "Visionary ID #n" badge on self-hosted
-#      instances. badge-patch.sh brings those back; a lifetime grant applies it.
+#   The Visionary badge and number need nothing more: since 2026.1025 the api builds
+#   the profile badges itself, and the stock client shows them on this instance.
 #
 # --duration is a gift code minted and redeemed in one go (gifts.sh create, then
 # redeem), so it gets a gift's end-date handling and stacking. Being an admin's grant
@@ -164,20 +163,6 @@ SQL
 	esac
 	[ "$id" != 0 ] && [ "$id" != 1 ] || die "'$arg' is a synthetic system account"
 	printf '%s\n' "$id"
-}
-
-badge_patch_applied() {
-	[ -s "$OPS/patches/patched.names" ]
-}
-
-ensure_badge_patch() {
-	if badge_patch_applied; then
-		echo "Visionary badge patch: already applied."
-		return 0
-	fi
-	echo "Visionary badge patch: not applied yet, applying it now."
-	echo
-	"$OPS/badge-patch.sh" || echo "premium: the badge patch did not apply; premium is granted, only the Visionary extras are missing" >&2
 }
 
 # The client shows no premium at all unless the instance reports premium_enabled
@@ -324,10 +309,6 @@ SQL
 	[ $((before & BADGE_HIDDEN)) -eq 0 ] || echo "  cleared      BADGE_HIDDEN (it was hiding the badge)"
 	[ $((before & BADGE_MASKED)) -eq 0 ] || echo "  cleared      BADGE_MASKED (it was showing lifetime as subscription)"
 	echo
-	if [ -z "${PREMIUM_SKIP_BADGE_PATCH:-}" ]; then
-		ensure_badge_patch
-		echo
-	fi
 	warn_if_premium_hidden
 	echo "Reload the client to see it."
 }

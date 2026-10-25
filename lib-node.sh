@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # lib-node.sh - a node for the small build steps (patching, brotli). Sourced by
-# badge-patch.sh and overlay.sh; not a command.
+# overlay.sh; not a command.
 #
 # Prefers the host's node (or the newest nvm one, which is not on PATH under cron or
 # a plain sh), and falls back to the node inside the api image, so a host with no node

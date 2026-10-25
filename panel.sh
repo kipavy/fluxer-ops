@@ -80,9 +80,6 @@ Environment=FLUXER_DIR=$FLUXER_DIR
 # domain, and reaches the database through the project's name.
 Environment=FLUXER_DOMAIN=$(domain)
 Environment=FLUXER_PROJECT=$(fx_project)
-# The panel must never run badge-patch.sh: it recreates app-proxy and edge, far longer
-# than the bridge's 60 s timeout. premium.sh (and gifts.sh, which calls it) honour this.
-Environment=PREMIUM_SKIP_BADGE_PATCH=1
 ExecStart=$3 -I $OPS/ops_bridge.py --socket $SOCKET
 Restart=always
 RestartSec=2
