@@ -385,9 +385,37 @@ check_panel() {
 	else
 		fail "the Ops panel is on but its route is not in $FLUXER_DIR/caddy.d/" "fluxer panel refresh"
 	fi
+	# Through edge on this host: the bridge's JSON, not the app's catch-all html.
+	d=$(fx_domain)
+	if curl -s --max-time 10 --resolve "$d:443:127.0.0.1" "https://$d/ops-api/health" 2> /dev/null | grep -q '"ok": *true'; then
+		ok "Ops panel route answers through edge"
+	else
+		fail "edge does not route /ops-api/ to the bridge (the app answers instead)" "fluxer panel refresh; if it persists: fluxer update (an old release's Caddyfile does not import caddy.d/)"
+	fi
 }
 
 # --- rexctl ---------------------------------------------------------------------
+
+# What fluxer-ops relies on from rexctl, checked as it is used: a rexctl update that
+# changes one of these shows up here instead of as a silent failure at 5 a.m.
+check_rexctl_contract() {
+	fx_managed || return 0
+	problems=''
+	[ -n "$(fx_domain)" ] || problems="$problems; config get no longer gives the domain"
+	j=$(rexctl -q upgrade --check --json 2> /dev/null) || j=''
+	printf '%s' "$j" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+missing = [k for k in ("current", "latest", "available", "blocked") if k not in d]
+sys.exit(1 if missing else 0)' 2> /dev/null || problems="$problems; upgrade --check --json changed shape (autoupdate reads current/latest/available/blocked)"
+	grep -q '"project": *"' "$FLUXER_DIR/.rexctl/state.json" || problems="$problems; state.json has no project name"
+	grep -q 'conf\.d' "$FLUXER_DIR/Caddyfile" 2> /dev/null || problems="$problems; the Caddyfile no longer imports caddy.d/ (the Ops panel route)"
+	if [ -n "$problems" ]; then
+		fail "rexctl no longer behaves as fluxer-ops expects:${problems#;}" "update fluxer-ops (git pull), or report it"
+	else
+		ok "rexctl $("$(fx_rexctl_bin)" version 2> /dev/null | head -n 1 | sed 's/^rexctl //'): everything fluxer-ops uses is there"
+	fi
+}
 
 # Upstream's own checks (engine, ports, DNS, certificates, stale files...): failures
 # and warnings, one line each.
@@ -417,7 +445,16 @@ for c in checks:
 		rm -f "$rx"; ok "rexctl doctor: no problem"
 		return
 	fi
+	# Two of upstream's checks assume a setup this one is not: behind Cloudflare's proxy
+	# the domain resolves to Cloudflare (check_cf_ips covers that side), and the nightly
+	# backups are backup.sh's (check_backup), not `rexctl backup` archives.
+	behind_cf=0
+	curl -sI --max-time 10 "https://$(fx_domain)/_health" 2> /dev/null | grep -qi '^cf-ray:' && behind_cf=1
 	while IFS="$(printf '\t')" read -r line fix; do
+		case "$line" in
+			*" dns: "*) if [ "$behind_cf" -eq 1 ]; then skip "rexctl doctor, dns (behind Cloudflare's proxy: it resolves to Cloudflare)"; continue; fi ;;
+			*" backup-age: "*) skip "rexctl doctor, backup-age (rexctl's own archives; backup.sh is checked above)"; continue ;;
+		esac
 		case "$line" in
 			fail\ *) fail "rexctl doctor, ${line#fail }" "${fix:-rexctl doctor}" ;;
 			*) warn "rexctl doctor, ${line#warn }" "${fix:-rexctl doctor}" ;;
@@ -542,6 +579,7 @@ check_overlay
 check_badge_patch
 check_panel
 check_rexctl
+check_rexctl_contract
 check_tls
 check_rollback_images
 
