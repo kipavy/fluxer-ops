@@ -31,8 +31,9 @@ cat > "$tmp/bin/upcheck" <<'X'
 #!/bin/sh
 [ -n "${CHECK_FAIL:-}" ] && { echo "Couldn't check for a new release." >&2; exit 1; }
 if [ -n "${AVAIL:-}" ]; then
-	printf '{"current":"2026.1023.1","latest":"2026.1025.2","available":true,"blocked":%s,"min_from":"%s"}\n' \
-		"${BLOCKED:+true}${BLOCKED:-false}" "${BLOCKED:+2026.1024.1}"
+	b=false m=''
+	[ -z "${BLOCKED:-}" ] || { b=true; m=2026.1024.1; }
+	printf '{"current":"2026.1023.1","latest":"2026.1025.2","available":true,"blocked":%s,"min_from":"%s"}\n' "$b" "$m"
 else
 	printf '{"current":"2026.1025.2","latest":"2026.1025.2","available":false,"blocked":false}\n'
 fi
