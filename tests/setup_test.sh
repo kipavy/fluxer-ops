@@ -354,7 +354,7 @@ EOF
     *"(https://)"*) fail "empty domain: does not print a bare (https://)" ;;
     *) pass "empty domain: does not print a bare (https://)" ;;
   esac
-  assert_contains "empty domain: says so honestly" "no FLUXER_DOMAIN" "$out"
+  assert_contains "old-installer instance: says to migrate" "fluxer migrate" "$out"
 
   # Half-installed: docker-compose.yml without .env. A plain re-run must name
   # the file in the way rather than walk into phase_install and upstream's
