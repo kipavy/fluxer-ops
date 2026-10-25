@@ -35,6 +35,34 @@ USAGE
 	exit 2
 }
 die() { printf '%s\n' "$*" >&2; exit 1; }
+
+# Under rexctl there is no .env: settings live in .rexctl/state.json and `rexctl
+# config` reads and changes them (validated, secrets masked, applied for you). The
+# old verbs map onto it.
+if fx_managed; then
+	cmd=${1:-}
+	[ $# -gt 0 ] && shift || true
+	case "$cmd" in
+		keys | list) exec "$(fx_rexctl_bin)" --dir "$FLUXER_DIR" config list --all "$@" ;;
+		get) exec "$(fx_rexctl_bin)" --dir "$FLUXER_DIR" config get "$@" ;;
+		set)
+			[ $# -eq 2 ] || die "usage: env.sh set KEY VALUE   (VALUE - reads stdin)"
+			value=$2
+			[ "$value" != - ] || IFS= read -r value
+			rexctl config set "$1=$value"
+			;;
+		unset) [ $# -ge 1 ] || die "usage: env.sh unset KEY..."; rexctl config unset "$@" ;;
+		diff) die "env.sh diff: not under rexctl, which adds new settings itself on upgrade (rexctl config list)" ;;
+		*)
+			cat >&2 <<'USAGE'
+usage: env.sh list | get KEY [--reveal] | set KEY VALUE | unset KEY...
+       (rexctl config underneath: rexctl config --help)
+USAGE
+			exit 2
+			;;
+	esac
+	exit
+fi
 [ -f "$ENV" ] || die "no .env in $FLUXER_DIR"
 
 # Names only; the value is looked at separately, for URLs carrying a password.

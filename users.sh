@@ -63,7 +63,7 @@ psql_() {
 	if [ -n "$PG_CONTAINER" ]; then
 		docker exec -i "$PG_CONTAINER" psql -X -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@"
 	else
-		(cd "$FLUXER_DIR" && docker compose exec -T postgres psql -X -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@")
+		(compose exec -T postgres psql -X -U fluxer -d fluxer -v ON_ERROR_STOP=1 "$@")
 	fi
 }
 psql_val() { psql_ -At "$@" | tr -d '\r'; }

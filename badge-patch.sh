@@ -27,7 +27,7 @@
 # There is no environment variable for this, and flipping FLUXER_SELF_HOSTED would
 # change the setup flow, registration and the Stripe paths too. So this patches the
 # shipped bundle: take the chunk out of the app-proxy image, edit it, and serve it
-# back through docker-compose.override.yml, which overlay.sh writes (it
+# back through custom.compose.yml, which rexctl loads and overlay.sh writes (it
 # also carries the STAFF Ops panel when that is on). The image is never modified, and
 # `badge-patch.sh --revert` puts everything back.
 #
@@ -65,11 +65,10 @@ STATIC=/srv/app/static
 ASSET_DIR="$STATIC/assets"
 
 die() { printf 'badge-patch: %s\n' "$*" >&2; exit 1; }
-compose() { (cd "$FLUXER_DIR" && docker compose "$@"); }
 
 app_proxy_image() {
-	img=$(compose config --images 2>/dev/null | grep 'fluxer-app-proxy' | head -n 1) || img=''
-	[ -n "$img" ] || die 'cannot resolve the app-proxy image from the compose config'
+	img=$(fx_image app-proxy) || img=''
+	[ -n "$img" ] || die 'cannot find the image app-proxy runs (is the stack up?)'
 	printf '%s\n' "$img"
 }
 
@@ -331,8 +330,8 @@ verify() {
 
 	# The HTML is what makes the patch reachable, and it is the one thing no cache
 	# holds on to, so check it at the origin and through the public hostname.
-	domain=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
-	[ -n "$domain" ] || die 'no FLUXER_DOMAIN in .env, cannot check the public URL'
+	domain=$(fx_domain)
+	[ -n "$domain" ] || die 'cannot read the instance domain, cannot check the public URL'
 	local_html=$(compose exec -T edge wget -qO- http://app-proxy:8080/ 2>/dev/null) || local_html=''
 	pub_html=$(curl -s --max-time 30 "https://$domain/") || pub_html=''
 	for n in $html_names; do

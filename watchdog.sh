@@ -61,20 +61,22 @@ else
 fi
 
 # 2. Is the whole stack up?
-cd "$FLUXER_DIR"
-expected=$(docker compose config --services 2>/dev/null | grep -vc '^seaweedfs-init$' || echo 0)
-running=$(docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
-if [ "${expected:-0}" -gt 0 ] && [ "${running:-0}" -lt "${expected:-0}" ]; then
+#    Not when someone stopped it on purpose (rexctl stop): rexctl records that.
+expected=$(fx_services | grep -vc '^seaweedfs-init$' || echo 0)
+running=$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
+if fx_managed && grep -q '"stopped": *true' "$FLUXER_DIR/.rexctl/state.json" 2> /dev/null; then
+	log "stack stopped on purpose (rexctl stop): not bringing it up"
+elif [ "${expected:-0}" -gt 0 ] && [ "${running:-0}" -lt "${expected:-0}" ]; then
 	log "only ${running:-0}/${expected} services running - bringing the stack up"
-	if docker compose up -d > "$LOG.compose" 2>&1; then
-		log "compose up -d done (output in $LOG.compose)"
-		upped='ran docker compose up -d'
+	if fx_apply > "$LOG.compose" 2>&1; then
+		log "stack brought up (output in $LOG.compose)"
+		upped='brought the stack up (rexctl start)'
 	else
-		log "compose up -d FAILED - see $LOG.compose"
-		upped="docker compose up -d FAILED (output in $LOG.compose)"
+		log "bringing the stack up FAILED - see $LOG.compose"
+		upped="bringing the stack up FAILED (output in $LOG.compose)"
 	fi
 	sleep 30
-	after=$(docker compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
+	after=$(compose ps --status running --format '{{.Service}}' 2>/dev/null | grep -c . || true)
 	notify alert stack-down "Only ${running:-0}/${expected} services were running; $upped. Now ${after:-0}/${expected} running."
 elif [ "${expected:-0}" -gt 0 ]; then
 	notify ok stack-down "All ${expected} services running."
@@ -103,7 +105,7 @@ fi
 #    it - lifetime included - 3 days after that date (premium.sh --repair explains).
 #    Every 10 minutes is well inside those 3 days. Silent when nothing needed fixing;
 #    whatever it fixes, or a failure, goes to the log. Never fails the watchdog.
-if [ -n "$(docker compose ps -q --status running postgres 2> /dev/null)" ]; then
+if [ -n "$(compose ps -q --status running postgres 2> /dev/null)" ]; then
 	if fixed=$("$OPS/premium.sh" --repair 2>&1); then
 		printf '%s\n' "$fixed" | while IFS= read -r line; do
 			[ -z "$line" ] || log "$line"

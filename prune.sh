@@ -9,8 +9,10 @@
 # removed from this host". This removes only what nothing can want:
 #
 #   kept      images of any container on the host, running or stopped
-#             images the current compose file resolves to
-#             image IDs (and refs) in the newest N installer records
+#             images the current release pins, and those of every release rexctl
+#             keeps for `rexctl rollback` (.rexctl/releases/*/images.json)
+#             (before rexctl: what the compose file resolves to)
+#             image IDs (and refs) in the newest N old-installer records
 #   removed   dangling images of a repository the stack uses, and registry
 #             fluxer-* images, that are in none of the above
 #
@@ -57,9 +59,25 @@ if [ -s "$tmp/containers" ]; then
 		|| die "docker inspect failed; refusing to guess what is in use."
 fi
 
-(cd "$FLUXER_DIR" && docker compose config --images) > "$tmp/refs" 2> "$tmp/compose-err" \
-	|| die "docker compose config --images failed in $FLUXER_DIR, so the stack's images are unknown. Nothing removed.
+if fx_managed; then
+	# rexctl pins every image by release: the current ones are in state.json, and each
+	# release it keeps for `rexctl rollback` lists its own in releases/<v>/images.json.
+	prc=0
+	python3 - "$FLUXER_DIR/.rexctl" > "$tmp/refs" 2> "$tmp/compose-err" <<'PY' || prc=$?
+import glob, json, os, sys
+d = sys.argv[1]
+refs = set((json.load(open(os.path.join(d, "state.json"))).get("images") or {}).get("refs", {}).values())
+for f in glob.glob(os.path.join(d, "releases", "*", "images.json")):
+    refs.update(json.load(open(f)).get("images") or [])
+print("\n".join(sorted(r for r in refs if r)))
+PY
+	[ "$prc" -eq 0 ] || die "cannot read rexctl's image lists in $FLUXER_DIR/.rexctl, so the stack's images are unknown. Nothing removed.
 $(cat "$tmp/compose-err")"
+else
+	(cd "$FLUXER_DIR" && docker compose config --images) > "$tmp/refs" 2> "$tmp/compose-err" \
+		|| die "docker compose config --images failed in $FLUXER_DIR, so the stack's images are unknown. Nothing removed.
+$(cat "$tmp/compose-err")"
+fi
 [ -s "$tmp/refs" ] || die "the compose file in $FLUXER_DIR names no images. Nothing removed."
 sort -u "$tmp/refs" -o "$tmp/refs"
 # The registry as compose resolves it (.env may spell it as ${...}).
@@ -215,7 +233,7 @@ printf '\nBuild cache: %s. Not touched here; docker builder prune clears it.\n' 
 # No record at all more often means the installer kept them elsewhere
 # (--backup-dir) than that there is no rollback, and guessing wrong is the one
 # mistake this script exists to prevent.
-[ -s "$tmp/records" ] || die "
+fx_managed || [ -s "$tmp/records" ] || die "
 No installer records in $RECORD_DIR, so rollback images cannot be told apart.
 If install.sh ran with --backup-dir, set RECORD_DIR to it. Nothing removed."
 

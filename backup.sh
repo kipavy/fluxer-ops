@@ -3,8 +3,8 @@
 #
 # The database dump is fully consistent and needs no downtime. The uploads copy
 # is taken hot (no stack stop): SeaweedFS blobs are effectively write-once, so
-# this is safe in practice. install.sh --update still takes its own cold,
-# stack-stopped copy before every upgrade, so upgrades are covered separately.
+# this is safe in practice. rexctl upgrade still takes its own backup before every
+# upgrade, so upgrades are covered separately.
 #
 # A backup that silently stopped working is found out at restore time, which is
 # the worst time. So a failure goes to notify.sh (key `backup`), and the next
@@ -48,7 +48,7 @@ cd "$FLUXER_DIR"
 
 # 1. Database.
 stage='database dump (pg_dump)'
-if docker compose exec -T postgres pg_dump -U fluxer -d fluxer --format=custom > "$dest/fluxer.dump" 2>> "$LOG"; then
+if compose exec -T postgres pg_dump -U fluxer -d fluxer --format=custom > "$dest/fluxer.dump" 2>> "$LOG"; then
 	log "dump ok      $(du -h "$dest/fluxer.dump" | cut -f1)  -> auto-$ts"
 else
 	log "dump FAILED  - removing incomplete $dest"
@@ -59,7 +59,7 @@ fi
 # 2. Uploads.
 stage='uploads copy'
 uploads=ok
-if docker run --rm -v fluxer_seaweedfs-data:/data:ro -v "$dest:/backup" alpine:3.22 \
+if docker run --rm -v "$(fx_project)_seaweedfs-data:/data:ro" -v "$dest:/backup" alpine:3.22 \
 	tar czf /backup/seaweedfs-data.tgz -C /data . >> "$LOG" 2>&1; then
 	log "uploads ok   $(du -h "$dest/seaweedfs-data.tgz" | cut -f1)"
 else
@@ -67,10 +67,19 @@ else
 	uploads=failed
 fi
 
-# 3. Config and secrets - without .env the other two cannot be restored.
-stage='copying .env and config'
-cp .env "$dest/.env"
-chmod 600 "$dest/.env"
+# 3. Config and secrets - without them the other two cannot be restored. Under rexctl
+#    they all live in .rexctl/state.json (settings, secrets, release); before, in .env.
+stage='copying settings and config'
+if fx_managed; then
+	mkdir -p "$dest/rexctl"
+	cp .rexctl/state.json "$dest/rexctl/state.json"
+	chmod 600 "$dest/rexctl/state.json"
+	cp custom.compose.yml "$dest/" 2> /dev/null || true
+	cp -r caddy.d "$dest/caddy.d" 2> /dev/null || true
+else
+	cp .env "$dest/.env"
+	chmod 600 "$dest/.env"
+fi
 cp docker-compose.yml Caddyfile "$dest/" 2> /dev/null || true
 cp -r ops "$dest/ops" 2> /dev/null || true
 

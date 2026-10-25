@@ -324,49 +324,32 @@ fetch_installer() {
 		|| die 4 "The Fluxer installer's checksum did not verify. It was not run."
 }
 
-installer_meaning() {
-	case "$1" in
-		1) echo "it rejected its arguments (a setup.sh bug: please report it)" ;;
-		2) echo "a prerequisite is missing (its message is above)" ;;
-		3) echo "it refused to overwrite an existing instance (message above)" ;;
-		4) echo "a download failed" ;;
-		5) echo "generating the instance's secrets failed" ;;
-		6) echo "the stack did not come up. Most often: DNS does not point here yet, or ports 80/443 are closed at the provider" ;;
-		130) echo "it was interrupted" ;;
-		*) echo "exit code $1" ;;
-	esac
-}
-
+# upstream's installer installs rexctl (into ~/.local/bin, or /usr/local/bin as root),
+# checksum-verified, then runs it with these arguments: `rexctl install`.
 phase_install() {
 	fetch_installer
 	mkdir -p "$FLUXER_DIR"
-	# A record for update.sh to refresh later, NOT what is about to run: $TMP is a
-	# private 0700 mktemp directory, but $FLUXER_DIR is not, so between this copy
-	# landing and the `sh` below, anyone who can write $FLUXER_DIR could otherwise
-	# swap in their own script and have it run with $ALLOW_ROOT/sudo behind it.
-	# Running the $TMP copy directly closes that: the bytes executed are exactly
-	# the bytes fetch_installer just checksum-verified.
-	cp "$TMP/install.sh" "$FLUXER_DIR/install.sh"
-	st_do "installing Fluxer into $FLUXER_DIR (about 3.5 GB of images: a few minutes)"
+	st_do "installing Fluxer into $FLUXER_DIR with rexctl (about 3.5 GB of images: a few minutes)"
 	_rc=0
-	# shellcheck disable=SC2086 # ALLOW_ROOT is empty or one flag
-	sh "$TMP/install.sh" --dir "$FLUXER_DIR" --domain "$DOMAIN" --email "$EMAIL" --non-interactive $ALLOW_ROOT || _rc=$?
-	[ "$_rc" -eq 0 ] || die "$_rc" "The Fluxer installer stopped: $(installer_meaning "$_rc"). Fix that and run setup again."
+	# The $TMP copy, private and just checksum-verified, is what runs. The admin account
+	# is made in the browser afterwards: rexctl prints the link.
+	sh "$TMP/install.sh" install --dir "$FLUXER_DIR" --domain "$DOMAIN" --setup browser --yes < /dev/null || _rc=$?
+	[ "$_rc" -eq 0 ] || die "$_rc" "rexctl install stopped (exit $_rc, message above). Most often: DNS does not point here yet, or ports 80/443 are closed at the provider. Fix that and run setup again."
 	NEW_INSTANCE=1
-	st_ok "Fluxer is installed"
+	st_ok "Fluxer is installed (rexctl manages it)"
 }
 
 phase_instance() {
+	if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.rexctl/state.json" ]; then
+		DOMAIN=$(fx_domain)
+		st_ok "Fluxer found at $FLUXER_DIR${DOMAIN:+ (https://$DOMAIN)}, managed by rexctl"
+		return 0
+	fi
 	if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/docker-compose.yml" ] && [ -f "$FLUXER_DIR/.env" ]; then
+		# Runs, but cannot update: upstream retired the installer that made it.
 		DOMAIN=$(sed -n 's/^FLUXER_DOMAIN=//p' "$FLUXER_DIR/.env" | head -n 1)
-		if [ -n "$DOMAIN" ]; then
-			st_ok "Fluxer found at $FLUXER_DIR (https://$DOMAIN)"
-		else
-			# .env exists but has no FLUXER_DOMAIN yet (edited by hand, or written by
-			# a step that died before this line): "(https://)" would read as found
-			# and working, when nothing is actually being served yet.
-			st_ok "Fluxer found at $FLUXER_DIR (no FLUXER_DOMAIN in .env yet)"
-		fi
+		st_bad "Fluxer found at $FLUXER_DIR${DOMAIN:+ (https://$DOMAIN)}, made by the old installer: run 'fluxer migrate' to hand it to rexctl"
+		MISSING=1
 		return 0
 	fi
 	if [ "$CHECK_ONLY" -eq 1 ]; then
@@ -690,7 +673,7 @@ check_ops_layout
 
 say ""
 say "Wiring"
-if [ -n "$FLUXER_DIR" ] && [ -f "$FLUXER_DIR/.env" ]; then core_wiring; fi
+if [ -n "$FLUXER_DIR" ] && { [ -f "$FLUXER_DIR/.rexctl/state.json" ] || [ -f "$FLUXER_DIR/.env" ]; }; then core_wiring; fi
 
 [ "$CHECK_ONLY" -eq 1 ] && exit "$MISSING"
 [ "$EXTRAS" -eq 1 ] && phase_extras
