@@ -82,6 +82,11 @@ Abort before Step 4 → `rexctl start` on the VM; nothing public has changed.
 - [ ] **Step 1: On the VM,** note the time, `rexctl stop`, and comment out the watchdog, backup, disk and autoupdate cron lines (root and user), keeping them in comments.
 - [ ] **Step 2: Final backup and transfer:** Task 3 Steps 1-2.
 - [ ] **Step 3: On the NAS,** restore over the rehearsal (same `--dir`), keep the plain-HTTP edge setting, start everything (push and worker included). Verify: `fluxer check` passes, and every service is healthy.
+- [ ] **Step 3b: Carry fluxer-ops' local state**, which is in neither git nor the rexctl backup.
+  - From the VM's `ops/`: `notify.conf` (alert channels, the changelog webhook and the OpenRouter key of the nightly Haiku summary) and `panel/` (enabled flag, `route.caddy`, `www/`).
+  - `~/.local/state/fluxer-autoupdate/`.
+  - Then run `fluxer panel refresh` and `./overlay.sh apply` on the NAS.
+  - Verify: `autoupdate.sh status` shows the channel and the summary configured, `notify.sh` lists the same channels, and the Ops panel answers.
 - [ ] **Step 4: Switch the domain.** Tunnel public hostname `fluxer.kipavy.fr` → `http://<LXC IP>:80`; Cloudflare replaces the A record pointing at the VM (the operator confirms that replacement).
 - [ ] **Step 5: Verify with the operator.**
   - An existing session still logged in.

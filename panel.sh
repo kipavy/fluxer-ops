@@ -34,10 +34,7 @@ domain() { fx_domain; }
 
 # GET through edge on this host. Cloudflare in front would cache, and a failure there
 # says nothing about this server. Prints the status code; the body goes to $2.
-origin_get() {
-	d=$(domain)
-	curl -s --max-time 15 -o "${2:-/dev/null}" -w '%{http_code}' --resolve "$d:443:127.0.0.1" "https://$d$1" || true
-}
+origin_get() { fx_origin_get "$(domain)" "$1" "${2:-/dev/null}"; }
 bridge_health() { curl -s --max-time 3 --unix-socket "$SOCKET" http://bridge/health 2> /dev/null | grep -q '"ok": *true'; }
 
 # Imported inside upstream's site block. Caddy orders handle blocks by how specific
