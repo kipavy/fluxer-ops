@@ -140,7 +140,7 @@ Three commands are worth knowing before you need them:
 | `update.sh` | you, when updating; `autoupdate.sh` | Around `rexctl upgrade`: iptables preflight, the plan, asks, overlay off, upgrade, `check.sh`, overlay back on. `--to V` for a given release. |
 | `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when `rexctl upgrade --check` reports a newer release; posts the changelog to a channel, pauses itself after a failure. |
 | `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length. One command, start to finish. |
-| `overlay.sh` | `panel.sh`, `update.sh` | The one writer of `custom.compose.yml`, the panel route in `caddy.d/` and the served `index.html` for the Ops panel, applied with `rexctl start`. `suspend` drops it for an update. |
+| `overlay.sh` | `panel.sh`, `update.sh`, you | The one writer of `custom.compose.yml`, the panel route in `caddy.d/` and the served `index.html` for the Ops panel, applied with `rexctl start`. Also slows every service's healthcheck to `FLUXER_OPS_HEALTH_INTERVAL` (default `60s`, `off` keeps upstream's 10 s), panel or not: on a 2-vCPU ARM VM the checks' process churn ate most of the CPU. `suspend` drops it for an update. |
 | `panel.sh` | you, `update.sh` (`refresh`) | The in-app STAFF Ops panel: bridge unit, Caddy route (`caddy.d/fluxer-ops-panel.caddy`), script. `off` is the kill switch. |
 | `ops_bridge.py` | systemd (`fluxer-ops-bridge`) | Runs allowlisted commands for the Ops panel after checking the session and STAFF. |
 | `notify.sh` | `watchdog.sh`, `backup.sh`, `offsite.sh`, you | Alerts through ntfy, a webhook and/or email, on state changes only. |
