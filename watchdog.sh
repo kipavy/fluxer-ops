@@ -13,6 +13,12 @@
 # when it recovers). Without a notify.conf that is a no-op.
 set -eu
 
+# Cron runs this with PATH=/usr/bin:/bin. iptables, systemctl and runuser live in
+# /usr/sbin or /sbin on Debian: without them a present DOCKER chain reads as flushed,
+# and docker was restarted every 10 minutes for nothing (2026-11-08).
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH
+export PATH
+
 . "$(dirname "$(readlink -f "$0")")/lib.sh"
 need_instance
 LOG=${LOG:-/var/log/fluxer-watchdog.log}
