@@ -22,9 +22,18 @@ export REXCTL="$tmp/stub/rexctl"
 cat > "$tmp/stub/docker" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$DOCKER_LOG"
+# STUB_SERVICES lists the stack's services; each has a healthcheck unless it is in
+# STUB_NOHEALTH.
 case "$1 $2" in
-	"compose -p") case "$*" in *"ps -aq app-proxy"*) echo cid-app ;; esac; exit 0 ;;
-	"inspect -f") echo ghcr.io/fluxerapp/fluxer-app-proxy-self-hosted:v1; exit 0 ;;
+	"compose -p") case "$*" in
+		*"ps -aq app-proxy"*) echo cid-app ;;
+		*"ps -aq "*) eval "echo cid-\${$#}" ;;
+		*"ps -a --format"*) printf '%s\n' ${STUB_SERVICES:-} ;;
+	esac; exit 0 ;;
+	"inspect -f") case "$3" in
+		*Healthcheck*) case " ${STUB_NOHEALTH:-} " in *" ${4#cid-} "*) ;; *) echo yes ;; esac ;;
+		*) echo ghcr.io/fluxerapp/fluxer-app-proxy-self-hosted:v1 ;;
+	esac; exit 0 ;;
 esac
 if [ "$1" = run ]; then
 	for a in "$@"; do
@@ -78,6 +87,21 @@ assert_contains "composed index.html mounted" "      - $ops/overlay/index.html.g
 assert_contains "panel: socket dir" "      - $ops/panel/run:/run/fluxer-ops" "$yaml"
 assert_contains "panel: script dir" "      - $ops/panel/www:/srv/ops-panel:ro" "$yaml"
 case "$yaml" in *Caddyfile*) fail "no Caddyfile mount (caddy.d instead)" ;; *) pass "no Caddyfile mount (caddy.d instead)" ;; esac
+case "$yaml" in *"healthcheck:"*) fail "no services to tune: no healthcheck" ;; *) pass "no services to tune: no healthcheck" ;; esac
+
+# Healthchecks only: one block per service, nothing of the panel.
+yaml=$(load; render_override off "$(printf 'api\nworker')")
+assert_contains "health only: api tuned" "$(printf '  api:\n    healthcheck:\n      interval: 60s')" "$yaml"
+assert_contains "health only: worker tuned" "$(printf '  worker:\n    healthcheck:\n      interval: 60s')" "$yaml"
+case "$yaml" in *index.html*|*ops-panel*) fail "health only: no panel mounts" ;; *) pass "health only: no panel mounts" ;; esac
+# A service with panel mounts and a healthcheck is one block: a repeated key is invalid YAML.
+yaml=$(load; render_override on "$(printf 'edge\napi')")
+assert_eq "edge appears once" 1 "$(printf '%s\n' "$yaml" | grep -c '^  edge:$')"
+assert_contains "edge: mounts then healthcheck" \
+	"$(printf '      - %s/panel/run:/run/fluxer-ops\n    healthcheck:\n      interval: 60s' "$ops")" "$yaml"
+assert_contains "api tuned alongside the panel" "$(printf '  api:\n    healthcheck:\n      interval: 60s')" "$yaml"
+yaml=$(load; HEALTH_INTERVAL=90s; render_override off api)
+assert_contains "interval is configurable" "      interval: 90s" "$yaml"
 
 # --- the panel on, off, incomplete -----------------------------------------------------
 reset_state() {
@@ -116,6 +140,31 @@ for missing in www run route.caddy; do
 	[ ! -e "$compose_file" ] && pass "panel without $missing: nothing mounted" \
 		|| fail "panel without $missing: nothing mounted"
 done
+
+# --- healthcheck interval, with the panel off ------------------------------------------
+reset_state
+export STUB_SERVICES="api worker seaweedfs-init" STUB_NOHEALTH="seaweedfs-init"
+run_overlay apply > /dev/null
+yaml=$(cat "$compose_file")
+assert_contains "panel off: healthchecks still tuned" "$(printf '  api:\n    healthcheck:\n      interval: 60s')" "$yaml"
+assert_contains "panel off: worker tuned" "  worker:" "$yaml"
+case "$yaml" in *seaweedfs-init*) fail "a service without a healthcheck is left out" ;;
+	*) pass "a service without a healthcheck is left out" ;; esac
+case "$yaml" in *app-proxy*) fail "panel off: no panel mounts" ;; *) pass "panel off: no panel mounts" ;; esac
+[ ! -e "$route" ] && pass "panel off: no route" || fail "panel off: no route"
+assert_contains "panel off: applied with rexctl start" "$applied" "$(cat "$DOCKER_LOG")"
+
+: > "$DOCKER_LOG"
+FLUXER_OPS_HEALTH_INTERVAL=off run_overlay apply > /dev/null
+[ ! -e "$compose_file" ] && pass "interval off and panel off: compose file removed" \
+	|| fail "interval off and panel off: compose file removed"
+
+reset_state; panel_state
+run_overlay apply > /dev/null
+yaml=$(cat "$compose_file")
+assert_contains "panel on: mounts kept" "      - $ops/panel/www:/srv/ops-panel:ro" "$yaml"
+assert_contains "panel on: healthchecks tuned too" "$(printf '  api:\n    healthcheck:\n      interval: 60s')" "$yaml"
+unset STUB_SERVICES STUB_NOHEALTH
 
 # --- someone else's compose file is never touched -------------------------------------
 reset_state; panel_state
