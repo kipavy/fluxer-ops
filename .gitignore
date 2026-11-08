@@ -25,3 +25,6 @@ panel/
 
 # Python bytecode from running the bridge tests in the repo.
 __pycache__/
+
+# The voice kit's settings: LiveKit's key and secret.
+voice/.env

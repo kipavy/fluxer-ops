@@ -1,0 +1,6 @@
+# voice/Caddyfile - TLS for the voice server's domain (see compose.yml). Caddy gets
+# its certificate over HTTP-01, so 80 must reach this host (Cloudflare's proxy
+# passes the challenge through).
+{$VOICE_DOMAIN} {
+	reverse_proxy livekit:7880
+}
