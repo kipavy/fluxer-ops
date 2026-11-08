@@ -137,7 +137,7 @@ Three commands are worth knowing before you need them:
 | --- | --- | --- |
 | `check.sh` | you, anytime | Verifies 6 public endpoints, the `/gateway` WebSocket upgrade, container health, and that every script the app shell names resolves. Exit 0 = healthy, 1 = broken. `--quiet` for failures only. |
 | `watchdog.sh` | root cron, every 10 min | Restores Docker's iptables chain if firewalld wiped it, brings the stack up if services are missing, and runs `premium.sh --repair`. |
-| `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + settings (`.rexctl/state.json`, or `.env` before rexctl) + `custom.compose.yml`, `caddy.d/` + these scripts, into `../fluxer-backups/auto-<ts>/`, 14-day retention. Hot: no downtime, unlike `rexctl backup`. |
+| `backup.sh` | user cron, 03:00 daily | `pg_dump` + uploads + settings (`.rexctl/state.json`, or `.env` before rexctl) + `custom.compose.yml`, `caddy.d/` + these scripts, into `../fluxer-backups/auto-<ts>/`, kept `KEEP_DAYS` days (14 by default; 3 on this instance, where the Proxmox backup keeps the history). Hot: no downtime, unlike `rexctl backup`. |
 | `update.sh` | you, when updating; `autoupdate.sh` | Around `rexctl upgrade`: iptables preflight, the plan, asks, overlay off, upgrade, `check.sh`, overlay back on. `--to V` for a given release. |
 | `autoupdate.sh` | you (`on`/`off`/`status`); user cron, hourly, if enabled | Nightly `update.sh --yes`, but only when `rexctl upgrade --check` reports a newer release; posts the changelog to a channel, pauses itself after a failure. |
 | `premium.sh` | you; `watchdog.sh` (`--repair`) | Grants or revokes Plutonium on an account -- lifetime, open-ended or for a set length. One command, start to finish. |
@@ -175,7 +175,12 @@ Three commands are worth knowing before you need them:
 - `backup.sh` at 03:00 and `disk.sh --record` at 03:30 in the user's
 
 `fluxer autoupdate on` adds one more, only when asked (see
-[Automatic updates](#automatic-updates-fluxer-autoupdate)); `setup` never does.
+[Automatic updates](#automatic-updates-fluxer-autoupdate)); `setup` never does. Off a
+terminal it needs `--yes`.
+
+In a Proxmox LXC, `setup --yes` left root's crontab empty on 2026-11-08: check it
+(`sudo crontab -l`) and add the watchdog line by hand if it is missing. This
+instance's backup line also carries `KEEP_DAYS=3`.
 
 Each line carries `FLUXER_DIR=`, since cron starts with an empty environment.
 `fluxer setup --check` exits 1 if one is missing, which is also what `fluxer doctor`
@@ -766,7 +771,11 @@ OpenRouter key), `ops/panel/` (`enabled`, `route.caddy`, `www/`) and
 7. With someone on a client: still logged in, a DM is instant, an upload, a call from
    mobile data and one from inside the new host's network, the Ops panel.
 
-Keep the old host stopped, data untouched, for a couple of weeks before deleting it.
+Keep the old host stopped, data untouched, for a couple of weeks before deleting it,
+or at least keep the cutover backup somewhere off the new instance. In 2026-11 the
+old VM's Fluxer was deleted the same day (crons, systemd units `fluxer.service` and
+`fluxer-ops-bridge.service`, containers, volumes, images, files); the cutover backup
+is kept on the NAS's storage, outside the LXC.
 
 ## Known gaps
 
@@ -883,9 +892,12 @@ on an OCI A1 VM before; see *Moving to another host*, and
 Public access is a **Cloudflare Tunnel**: the NAS's own `cloudflared` (a separate LXC)
 sends the domain to the instance's edge in plain HTTP (`rexctl proxy on --bind
 <LXC IP>:8080`, so `edge.mode` is `proxy` and Cloudflare does TLS). The domain's DNS
-record is the tunnel's CNAME. No port 80/443 is open at home. The trusted proxies
-(`edge.trusted_proxies`) keep `private_ranges`, which is where the tunnel comes from,
-plus Cloudflare's ranges for the record's proxy.
+record is the tunnel's CNAME. No port 80/443 is open at home. Every request reaches
+edge from the `cloudflared` LXC, a private address, so `private_ranges` in
+`edge.trusted_proxies` is what makes edge read the visitor's IP from Cloudflare's
+headers. The Cloudflare ranges still in that list (and `fluxer cf-ips`) date from the
+previous host, where Cloudflare's proxy connected to the origin directly; they are
+harmless and no longer needed here.
 
 Voice (LiveKit) signalling goes through the tunnel (`/livekit` on the domain); its
 media cannot, so the home router forwards **7881/tcp and 7882/udp** to the LXC, and
