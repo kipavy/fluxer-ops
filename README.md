@@ -732,8 +732,12 @@ OpenRouter key), `ops/panel/` (`enabled`, `route.caddy`, `www/`) and
    SHA-256 against the release is simpler.
 2. Rehearse: `rexctl backup` on the old host (Fluxer pauses while uploads are
    copied), copy it over, restore it on the new host with nothing public pointing
-   there, check, `rexctl stop`. Stop `push` and `worker` right after the restore, or
-   block outgoing mail: a rehearsal has the real database.
+   there, check, `rexctl stop`. A rehearsal has the real database, so block its
+   outgoing mail **before** the restore (`iptables -I DOCKER-USER -p tcp -m multiport
+   --dports 25,465,587,2525 -j REJECT`, removed at the cutover) and keep the public
+   name away from it, so push has nothing to send. Do not stop `push` or `worker`
+   instead: `rexctl restore`, `start` and `proxy on` wait for every service to be
+   healthy and hang on a stopped one.
 3. Prepare the way in: for a tunnel or reverse proxy, `rexctl proxy on --bind
    <address>:8080` and a route to it (test it on a spare hostname first); open or
    forward LiveKit's media ports (7881/tcp, 7882/udp) to the new host; make sure no
