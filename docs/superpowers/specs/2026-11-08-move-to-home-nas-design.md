@@ -28,8 +28,8 @@ load but not the latency. The cause is the host, which we cannot fix from the gu
 | Where | A new dedicated Debian LXC `fluxer` on the Proxmox NAS, not the existing shared Docker LXC: own CPU/RAM/disk limits, own ZFS snapshots, one unit to back up or move, failures isolated both ways. |
 | Size | 2 cores, 4 GiB RAM, ~60 GB root disk on the mirrored ZFS pool (`tank`), not on the single-disk `local-lvm`. Measured need: ~1.5-2 GiB RAM steady, near-idle CPU, 2.2 GB uploads + ~3-4 GB images, uploads growing ~70 MB/day. |
 | Stack | Unchanged: rexctl + fluxer-ops, same release, same images (all published for linux/amd64 and linux/arm64, checked). Healthchecks stay at 60 s (PR #12). |
-| Public access | The existing Cloudflare Tunnel (its own LXC). `fluxer.kipavy.fr` becomes a public hostname of that tunnel pointing straight at the `fluxer` LXC's edge, not through the NAS's reverse proxy. **No port is opened on the home router**, by the operator's rule. |
-| Voice | LiveKit cannot go through a Cloudflare Tunnel (WebRTC media is UDP/TCP, not HTTP). It **stays on the OCI VM**, alone: the rest of the stack there is stopped. Fluxer on the NAS points at it. The VM already has 7881/tcp and 7882/udp open. |
+| Public access | The existing Cloudflare Tunnel (its own LXC). `fluxer.kipavy.fr` becomes a public hostname of that tunnel pointing straight at the `fluxer` LXC's edge, not through the NAS's reverse proxy. The only ports opened on the home router are LiveKit's media ports (next row). |
+| Voice | LiveKit stays the stack's bundled one, on the NAS. Its signalling goes through the tunnel like the rest (`/livekit` on the domain, a WebSocket); WebRTC media cannot, so the Livebox forwards **7881/tcp and 7882/udp** to the `fluxer` LXC. Decided 2026-11-08 instead of keeping LiveKit on the VM: an Always Free VM left running only LiveKit risks OCI's idle reclamation, and the home IP is already public (`enshrouded.kipavy.fr`, DNS only). Accepted cost: call participants see the home IP. |
 | Identity | The rexctl settings (`.rexctl/state.json`) move with the data, secrets included, so sessions, signed URLs and the LiveKit key/secret stay valid. Nothing is regenerated. |
 | Backups on the NAS | Covered without extra work by the Proxmox job (all guests, daily 21:00, to the NAS's PBS, snapshot mode) plus fluxer-ops' own nightly `backup.sh` inside the LXC, with local retention cut down since PBS keeps the history. Off-NAS copies are out of scope here. |
 | Re-migration | This move uses the stock backup/restore path, and the steps go into the README as "Moving to another host", tested by this very move. |
@@ -43,23 +43,21 @@ users ──https/wss──▶ Cloudflare ──tunnel──▶ cloudflared LXC 
                                                                        ├ api, worker, gateway, messages, users, …
                                                                        └ postgres, valkey, nats, meilisearch, seaweedfs
 
-voice:  users ──wss──▶ Cloudflare ──▶ voice.kipavy.fr ──▶ OCI VM: TLS proxy ──▶ livekit:7880 (signalling)
-        users ──UDP 7882 / TCP 7881──────────────────────▶ OCI VM: livekit (media, direct)
-        NAS api ──▶ https://voice.kipavy.fr (LiveKit's control API, same port, key-signed)
-        livekit webhooks ──▶ https://fluxer.kipavy.fr (through the tunnel)
+voice:  users ──wss──▶ Cloudflare ──tunnel──▶ edge /livekit ──▶ livekit:7880 (signalling, as today)
+        users ──UDP 7882 / TCP 7881──▶ home IP ──Livebox forward──▶ fluxer LXC: livekit (media)
 ```
 
-Settings involved on the NAS (rexctl config): `FLUXER_LIVEKIT_URL` and
-`FLUXER_LIVEKIT_INTERNAL_URL` both `https://voice.kipavy.fr` (LiveKit serves its
-control API on the signalling port, signed with the API key, so no Tailscale is
-needed in the LXC), `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` unchanged, and the
-`voice_servers` row in `fluxer_kv` (today `wss://fluxer.kipavy.fr/livekit`), which
-must name `wss://voice.kipavy.fr`. Behind the tunnel the edge serves plain HTTP for
-the domain (`http://fluxer.kipavy.fr` as its site address): Cloudflare does TLS, and
-Caddy could not get a certificate without an open port anyway. The edge's trusted
-proxies keep `private_ranges` so the tunnel's `Cf-Connecting-IP` is honoured. On the
-VM, `fluxer firewall-fix --apply` replaces the watchdog's chain repair, which no
-longer runs there.
+The voice settings do not change: `FLUXER_LIVEKIT_URL` stays
+`https://fluxer.kipavy.fr/livekit`, the internal URL `http://livekit:7880`, the key
+and secret and the `voice_servers` row (`wss://fluxer.kipavy.fr/livekit`) come over
+as they are. LiveKit finds the home IP over STUN (`use_external_ip`), as it found
+the VM's. Behind the tunnel the edge serves plain HTTP for the domain
+(`http://fluxer.kipavy.fr` as its site address): Cloudflare does TLS, and Caddy
+could not get a certificate without ports 80/443 open anyway. The edge's trusted
+proxies keep `private_ranges` so the tunnel's `Cf-Connecting-IP` is honoured.
+
+Devices on the home LAN reach LiveKit at the home's public IP, which needs the
+Livebox to loop it back (NAT loopback); a call from the LAN is part of the checks.
 
 ## The move
 
@@ -71,28 +69,24 @@ longer runs there.
    settings; Fluxer pauses a few minutes while uploads are copied), restored on the
    LXC with no public route and stopped right after the checks. At 2.2 GB the file
    moves in minutes, so no pre-copy.
-3. Prove the tunnel route on a temporary hostname, and `voice.kipavy.fr` on the
-   current LiveKit through the VM's edge. Prepare, not start, a standalone LiveKit
-   on the VM: same image, same key/secret, same config as the bundled one, plus a
-   TLS proxy for `voice.kipavy.fr`.
+3. Prove the tunnel route on a temporary hostname, and set the Livebox forwards
+   (7881/tcp, 7882/udp → the `fluxer` LXC); nothing listens there until the cutover.
 
 ### Cutover (downtime, estimated 30-60 min, mostly the slow VM)
 
 1. On the VM: stop the stack (the data freezes) and disable its cron jobs
    (watchdog, backup, autoupdate, disk record).
-2. Take a final clean backup (database dump, uploads tail, settings, configs, ops/)
-   and transfer it to the NAS.
+2. Take a final `rexctl backup` and transfer it to the NAS.
 3. On the NAS: restore, start, `fluxer check`.
-4. Start the standalone LiveKit on the VM; point the NAS instance at it (settings
-   above and the voice server endpoint in the database).
-5. Switch `fluxer.kipavy.fr` in Cloudflare to the tunnel.
-6. Verify with the operator: existing session still logged in, a DM sends at once,
-   an image upload, a voice call between two clients, the Ops panel, a Plutonium
-   account and the Visionary badge, an invite link.
+4. Switch `fluxer.kipavy.fr` in Cloudflare to the tunnel.
+5. Verify with the operator: existing session still logged in, a DM sends at once,
+   an image upload, a two-client voice call from outside (mobile data) and one from
+   the home LAN, the Ops panel, a Plutonium account and the Visionary badge, an
+   invite link.
 
 ### Rollback
 
-Until step 5 nothing public has changed: restart the stack on the VM. After step 5,
+Until step 4 nothing public has changed: restart the stack on the VM. After step 5,
 switching the record back and restarting the VM's stack works, but loses what was
 posted on the NAS in between, so the go/no-go is decided within the first hour.
 The VM's data stays untouched for two weeks after the move, then is deleted only
@@ -104,10 +98,7 @@ Each of these is checked during preparation; a "no" stops the move until resolve
 
 - A restore of the latest backup on the NAS LXC comes up and passes `fluxer check`
   (this also proves the uploads half of a restore, never run end to end before).
-- `voice.kipavy.fr` carries a real two-client call (signalling and media) before
-  the cutover, through the VM's current LiveKit.
-- Whether the API syncs the `voice_servers` row from `FLUXER_LIVEKIT_URL` on start,
-  or the row has to be updated as the admin API does.
+- The Livebox forwards 7881/tcp and 7882/udp to the `fluxer` LXC.
 - The tunnel serves a test hostname to the `fluxer` LXC's edge with the real client
   IP seen by Caddy.
 
@@ -115,5 +106,6 @@ Each of these is checked during preparation; a "no" stops the move until resolve
 
 - An off-NAS copy of the backups (the NAS's PBS is on the same pool; it covers a bad
   update and a failed disk, not the loss of the whole NAS).
-- Moving LiveKit itself off the VM.
+- Hiding the home IP from call participants (a TURN relay elsewhere).
+- What becomes of the VM after the 14 days (it may be reclaimed by OCI as idle).
 - Any change to what users see.
