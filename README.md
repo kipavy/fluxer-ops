@@ -67,7 +67,8 @@ go through its public commands only (`rexctl config`, `upgrade --check --json`,
 `start`, `rollback`...) and its two extension points, `custom.compose.yml` and
 `caddy.d/`, and never edit the files rexctl renders. They started on an Oracle Cloud
 host with firewalld, which is where several of them (watchdog, firewall-fix) come
-from.
+from; since 2026-11-08 they run on a home NAS LXC behind a Cloudflare Tunnel (*Notes
+on this instance*).
 
 ### Working with rexctl
 
@@ -669,8 +670,10 @@ another network, `nc -vz <ip> 7881` proves TCP.
 
 > The database half is **verified**: `fluxer verify-backup` restores the newest dump
 > into a scratch database and compares row counts against live. As of 2026-09-13 it
-> restored 568,748 rows matching live exactly. The **uploads** half has still never
-> been restored end to end, and `fluxer restore` itself has not been run in anger.
+> restored 568,748 rows matching live exactly. `rexctl backup` / `rexctl restore`,
+> uploads included, were run end to end on 2026-11-08 to move to a new host (see
+> *Moving to another host*): every table and a sampled upload came back identical.
+> `fluxer restore` (from `backup.sh`'s copies) itself has not been run in anger.
 
 ```sh
 fluxer restore auto-<timestamp>   # asks first; database, then uploads, then check
@@ -707,14 +710,73 @@ fluxer offsite restore latest /tmp/r
 fluxer restore /tmp/r/backup
 ```
 
+## Moving to another host
+
+Done once, OCI VM to a home NAS LXC on 2026-11-08, about 27 minutes of downtime.
+Nothing changes for users: the settings, secrets included, travel in the backup, so
+sessions, links and the LiveKit key stay valid.
+
+**What moves and what does not.** `rexctl backup` is one file with the database,
+search data, uploads and rexctl's settings (`.rexctl/state.json`); it restores on a
+new machine. It does **not** hold fluxer-ops' local state, which is in neither git
+nor that file: `ops/notify.conf` (alert channels, the changelog webhook, the
+OpenRouter key), `ops/panel/` (`enabled`, `route.caddy`, `www/`) and
+`~/.local/state/fluxer-autoupdate/`.
+
+**Before the day** (the old host keeps serving):
+
+1. New host: Docker, the same user name as before so paths match
+   (`~/Documents/fluxer`), and rexctl **at the old host's version** (`rexctl
+   version`). The installer runs `rexctl` once installed and can wait on a terminal,
+   so fetching the release's `rexctl_<version>_linux_<arch>.tar.gz` and checking its
+   SHA-256 against the release is simpler.
+2. Rehearse: `rexctl backup` on the old host (Fluxer pauses while uploads are
+   copied), copy it over, restore it on the new host with nothing public pointing
+   there, check, `rexctl stop`. A rehearsal has the real database, so block its
+   outgoing mail **before** the restore (`iptables -I DOCKER-USER -p tcp -m multiport
+   --dports 25,465,587,2525 -j REJECT`, removed at the cutover) and keep the public
+   name away from it, so push has nothing to send. Do not stop `push` or `worker`
+   instead: `rexctl restore`, `start` and `proxy on` wait for every service to be
+   healthy and hang on a stopped one.
+3. Prepare the way in: for a tunnel or reverse proxy, `rexctl proxy on --bind
+   <address>:8080` and a route to it (test it on a spare hostname first); open or
+   forward LiveKit's media ports (7881/tcp, 7882/udp) to the new host; make sure no
+   local DNS override captures the domain.
+
+**The day:**
+
+1. Old host: comment out its fluxer-ops cron lines (root's watchdog, the user's
+   backup, disk and autoupdate), `rexctl stop`, `rexctl backup`, `rexctl backup
+   verify <file>`.
+2. Copy the file and the local state above; compare `sha256sum` on both sides.
+3. New host: put fluxer-ops at `<instance>/ops` and the local state in place
+   (`notify.conf` 600; `panel/` readable by the edge container, 775/664), then
+   `rexctl restore <file> --confirm <domain> --dir <instance> -y`. The backup brings
+   `custom.compose.yml`, which mounts files from `ops/overlay/`: if `ops/` is
+   missing, docker creates root-owned empty directories in their place and
+   `app-proxy` cannot start. `./overlay.sh apply` rebuilds them.
+4. Re-apply what is specific to the host: `rexctl proxy on --bind ...` (the restore
+   brings the old host's edge settings), and drop any `caddy.d/` file that only made
+   sense there.
+5. Point the domain at the new host (tunnel: the route, then the record becomes the
+   tunnel's CNAME).
+6. `setup.sh --yes --no-extras` (check root's crontab for the watchdog afterwards),
+   `fluxer autoupdate on --at 05:00 --tz Europe/Paris --yes`, `fluxer panel refresh`,
+   `fluxer doctor`.
+7. With someone on a client: still logged in, a DM is instant, an upload, a call from
+   mobile data and one from inside the new host's network, the Ops panel.
+
+Keep the old host stopped, data untouched, for a couple of weeks before deleting it.
+
 ## Known gaps
 
 - **Off-site backups are built but not configured.** Until `ops/offsite.conf`
-  exists every backup is on the same disk as the data (`/dev/sda1`): it covers a bad
-  upgrade and nothing if the host or disk is lost.
+  exists every backup stays on the NAS: `backup.sh` in the LXC (3 days) and the
+  Proxmox backup job of the whole LXC (daily, to the NAS's own PBS) cover a bad
+  upgrade and a failed disk of the mirror, not the loss of the NAS.
 - **No alert channel configured**, so alerting is wired but silent.
-- **The firewalld fix is written but not applied** (`fluxer firewall-fix --apply`).
-- The **uploads** half of a restore has never been run end to end.
+- `doctor` warns that the firewalld fix is not installed: on the Debian LXC there is
+  no firewalld, so the warning does not apply there.
 - **Client-side changes reach the web app only.** Anything this repository puts into
   the client (the STAFF Ops panel) is served through this
   instance's `index.html`, which only the browser loads. The desktop app renders from its own
@@ -814,20 +876,29 @@ hand-added public proxy would be dropped.
 
 ## Notes on this instance
 
-Public access is Cloudflare's **DNS proxy** (orange cloud), not a `cloudflared`
-tunnel — there is no tunnel daemon anywhere on the host. Caddy (the `edge`
-service) terminates TLS on the origin. Because of this, the trusted proxies
-(`edge.trusted_proxies` in rexctl, `FLUXER_EDGE_TRUSTED_PROXIES` underneath) must list
-Cloudflare's ranges: the shipped `Caddyfile` sets
-`trusted_proxies_strict` and defaults to `private_ranges` only, so without them
-every client IP resolves to Cloudflare's edge and rate limits and bans key off the
-wrong address. `fluxer cf-ips` checks the list against Cloudflare's (`doctor` runs
-it too).
+Since 2026-11-08 the instance runs in a dedicated LXC on a home Proxmox NAS (it was
+on an OCI A1 VM before; see *Moving to another host*, and
+`docs/superpowers/specs/2026-11-08-move-to-home-nas-design.md` for why).
 
-Voice (LiveKit) uses 7881/tcp and 7882/udp **direct to the origin**, bypassing
-Cloudflare entirely.
+Public access is a **Cloudflare Tunnel**: the NAS's own `cloudflared` (a separate LXC)
+sends the domain to the instance's edge in plain HTTP (`rexctl proxy on --bind
+<LXC IP>:8080`, so `edge.mode` is `proxy` and Cloudflare does TLS). The domain's DNS
+record is the tunnel's CNAME. No port 80/443 is open at home. The trusted proxies
+(`edge.trusted_proxies`) keep `private_ranges`, which is where the tunnel comes from,
+plus Cloudflare's ranges for the record's proxy.
 
-Found while building `firewall-fix`, not acted on:
+Voice (LiveKit) signalling goes through the tunnel (`/livekit` on the domain); its
+media cannot, so the home router forwards **7881/tcp and 7882/udp** to the LXC, and
+call participants see the home IP. The router only forwards to devices it lists: the
+LXC appears there under a name of the router's choosing until renamed.
+
+The home DNS (AdGuard) rewrites the whole zone to the NAS's reverse proxy for local
+services; the instance's domain is exempted (rewrites answering `A` and `AAAA`, i.e.
+the real public answer). Without that exemption the api reaches the reverse proxy
+instead of LiveKit when it checks call presence, and home or Tailscale clients cannot
+open the instance at all.
+
+Found on the previous host (OCI VM) while building `firewall-fix`, not acted on:
 
 - `netfilter-persistent` is enabled alongside firewalld, and its
   `/etc/iptables/rules.v4` is dead weight: firewalld wipes it at start. What actually

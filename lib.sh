@@ -139,6 +139,45 @@ fx_project() {
 	printf '%s\n' "$FX_PROJECT"
 }
 
+# A string setting rexctl keeps in state.json, such as edge.mode; empty when unset.
+fx_state_value() {
+	[ -f "$FLUXER_DIR/.rexctl/state.json" ] || return 0
+	grep -o "\"$1\": *\"[^\"]*\"" "$FLUXER_DIR/.rexctl/state.json" | head -n 1 | sed 's/.*"\([^"]*\)"$/\1/'
+}
+
+# How edge is exposed: bundled (it serves HTTPS on 443 itself), proxy or tunnel (it
+# serves plain HTTP on edge.bind and something in front does TLS).
+fx_edge_mode() {
+	_m=$(fx_state_value edge.mode)
+	printf '%s\n' "${_m:-bundled}"
+}
+
+# fx_origin_get <domain> <path> [<body file>]: GET from edge on this host, without
+# going out through the public name; prints the HTTP status. Behind a proxy or tunnel
+# edge has no certificate and listens on edge.bind, so it is asked there in plain
+# HTTP with the domain as Host.
+fx_origin_get() {
+	_d=$1 _p=$2 _o=${3:-/dev/null}
+	case "$(fx_edge_mode)" in
+		bundled)
+			curl -s --max-time 15 -o "$_o" -w '%{http_code}' \
+				--resolve "$_d:443:127.0.0.1" "https://$_d$_p" || true ;;
+		*)
+			_b=$(fx_state_value edge.bind)
+			curl -s --max-time 15 -o "$_o" -w '%{http_code}' \
+				-H "Host: $_d" "http://${_b:-127.0.0.1:8080}$_p" || true ;;
+	esac
+}
+
+# The Caddyfile edge runs: rexctl renders it under .rexctl/generated/.
+fx_caddyfile() {
+	if fx_managed; then
+		printf '%s\n' "$FLUXER_DIR/.rexctl/generated/Caddyfile"
+	else
+		printf '%s\n' "$FLUXER_DIR/Caddyfile"
+	fi
+}
+
 # By project name and from /, so compose never loads the rendered files: they refuse to
 # load outside rexctl. ps, exec, logs, restart, stop and start need only the name.
 compose() {

@@ -348,9 +348,13 @@ check_panel() {
 	fi
 	# Through edge on this host: the bridge's JSON, not the app's catch-all html.
 	d=$(fx_domain)
-	if curl -s --max-time 10 --resolve "$d:443:127.0.0.1" "https://$d/ops-api/health" 2> /dev/null | grep -q '"ok": *true'; then
+	body=$(mktemp)
+	fx_origin_get "$d" /ops-api/health "$body" > /dev/null
+	if grep -q '"ok": *true' "$body"; then
+		rm -f "$body"
 		ok "Ops panel route answers through edge"
 	else
+		rm -f "$body"
 		fail "edge does not route /ops-api/ to the bridge (the app answers instead)" "fluxer panel refresh; if it persists: fluxer update (an old release's Caddyfile does not import caddy.d/)"
 	fi
 }
@@ -370,7 +374,7 @@ d = json.load(sys.stdin)
 missing = [k for k in ("current", "latest", "available", "blocked") if k not in d]
 sys.exit(1 if missing else 0)' 2> /dev/null || problems="$problems; upgrade --check --json changed shape (autoupdate reads current/latest/available/blocked)"
 	grep -q '"project": *"' "$FLUXER_DIR/.rexctl/state.json" || problems="$problems; state.json has no project name"
-	grep -q 'conf\.d' "$FLUXER_DIR/Caddyfile" 2> /dev/null || problems="$problems; the Caddyfile no longer imports caddy.d/ (the Ops panel route)"
+	grep -q 'conf\.d' "$(fx_caddyfile)" 2> /dev/null || problems="$problems; the Caddyfile no longer imports caddy.d/ (the Ops panel route)"
 	if [ -n "$problems" ]; then
 		fail "rexctl no longer behaves as fluxer-ops expects:${problems#;}" "update fluxer-ops (git pull), or report it"
 	else
@@ -442,7 +446,14 @@ check_tls() {
 		fail "cannot read the instance domain (rexctl config get domain)"
 		return
 	fi
-	for which in public origin; do
+	# Behind a proxy or tunnel edge serves plain HTTP: the only certificate is the one
+	# in front of it.
+	certs='public origin'
+	if [ "$(fx_edge_mode)" != bundled ]; then
+		certs=public
+		ok "no origin cert: edge.mode is $(fx_edge_mode), the proxy or tunnel in front does TLS"
+	fi
+	for which in $certs; do
 		case "$which" in
 			public) target="$domain:443" label="public cert (Cloudflare's edge)"
 				hint="Cloudflare dashboard: SSL/TLS > Edge Certificates" ;;
