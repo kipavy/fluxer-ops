@@ -45,30 +45,36 @@ users ──https/wss──▶ Cloudflare ──tunnel──▶ cloudflared LXC 
 
 voice:  users ──wss──▶ Cloudflare ──▶ voice.kipavy.fr ──▶ OCI VM: TLS proxy ──▶ livekit:7880 (signalling)
         users ──UDP 7882 / TCP 7881──────────────────────▶ OCI VM: livekit (media, direct)
-        NAS api ──▶ livekit control API (FLUXER_LIVEKIT_INTERNAL_URL, over Tailscale)
+        NAS api ──▶ https://voice.kipavy.fr (LiveKit's control API, same port, key-signed)
         livekit webhooks ──▶ https://fluxer.kipavy.fr (through the tunnel)
 ```
 
-Settings involved on the NAS (rexctl config): `FLUXER_LIVEKIT_URL` (public
-signalling URL, `wss://voice.kipavy.fr`), `FLUXER_LIVEKIT_INTERNAL_URL` (control API
-via Tailscale), `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` (unchanged), and the voice
-server endpoint stored in the database's voice region, which must name the OCI
-LiveKit. The edge's trusted proxies keep `private_ranges` so the tunnel's
-`Cf-Connecting-IP` is honoured.
+Settings involved on the NAS (rexctl config): `FLUXER_LIVEKIT_URL` and
+`FLUXER_LIVEKIT_INTERNAL_URL` both `https://voice.kipavy.fr` (LiveKit serves its
+control API on the signalling port, signed with the API key, so no Tailscale is
+needed in the LXC), `LIVEKIT_API_KEY`/`LIVEKIT_API_SECRET` unchanged, and the
+`voice_servers` row in `fluxer_kv` (today `wss://fluxer.kipavy.fr/livekit`), which
+must name `wss://voice.kipavy.fr`. Behind the tunnel the edge serves plain HTTP for
+the domain (`http://fluxer.kipavy.fr` as its site address): Cloudflare does TLS, and
+Caddy could not get a certificate without an open port anyway. The edge's trusted
+proxies keep `private_ranges` so the tunnel's `Cf-Connecting-IP` is honoured. On the
+VM, `fluxer firewall-fix --apply` replaces the watchdog's chain repair, which no
+longer runs there.
 
 ## The move
 
 ### Preparation (no downtime; the VM keeps serving)
 
 1. Create the `fluxer` LXC (Debian, nesting for Docker), install Docker and rexctl,
-   clone fluxer-ops, pull the release's images.
-2. Pre-copy the uploads volume over Tailscale. SeaweedFS writes append-only `.dat`
-   files, so the copy at cutover only carries the tail.
-3. Prepare, not start, a standalone LiveKit on the VM: same image, same key/secret,
-   same config as the bundled one, plus a TLS proxy for `voice.kipavy.fr`.
-4. Add `fluxer.kipavy.fr` → `fluxer` LXC as a tunnel public hostname, inactive until
-   the DNS record is switched. Lower nothing else: the record is already proxied by
-   Cloudflare, so the switch is immediate.
+   clone fluxer-ops.
+2. Rehearse: a `rexctl backup` of the VM (one file: database, search data, uploads,
+   settings; Fluxer pauses a few minutes while uploads are copied), restored on the
+   LXC with no public route and stopped right after the checks. At 2.2 GB the file
+   moves in minutes, so no pre-copy.
+3. Prove the tunnel route on a temporary hostname, and `voice.kipavy.fr` on the
+   current LiveKit through the VM's edge. Prepare, not start, a standalone LiveKit
+   on the VM: same image, same key/secret, same config as the bundled one, plus a
+   TLS proxy for `voice.kipavy.fr`.
 
 ### Cutover (downtime, estimated 30-60 min, mostly the slow VM)
 
@@ -98,10 +104,10 @@ Each of these is checked during preparation; a "no" stops the move until resolve
 
 - A restore of the latest backup on the NAS LXC comes up and passes `fluxer check`
   (this also proves the uploads half of a restore, never run end to end before).
-- The standalone LiveKit on the VM answers on `voice.kipavy.fr` and its control API
-  is reachable from the NAS over Tailscale.
-- Where the voice server endpoint lives (database row or setting) and how the API
-  registers it.
+- `voice.kipavy.fr` carries a real two-client call (signalling and media) before
+  the cutover, through the VM's current LiveKit.
+- Whether the API syncs the `voice_servers` row from `FLUXER_LIVEKIT_URL` on start,
+  or the row has to be updated as the admin API does.
 - The tunnel serves a test hostname to the `fluxer` LXC's edge with the real client
   IP seen by Caddy.
 
